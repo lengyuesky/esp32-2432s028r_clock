@@ -1,0 +1,14 @@
+# ESP-IDF 构建产物
+build/
+sdkconfig
+sdkconfig.old
+managed_components/
+dependencies.lock
+.cache/
+eim_config.toml
+
+# 编辑器和系统文件
+.vscode/
+.idea/
+*.swp
+Thumbs.db

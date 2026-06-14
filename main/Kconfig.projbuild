@@ -1,0 +1,197 @@
+menu "CYD Clock"
+
+    config CLOCK_WIFI_SSID
+        string "Wi-Fi SSID"
+        default ""
+
+    config CLOCK_WIFI_PASSWORD
+        string "Wi-Fi password"
+        default ""
+
+    config CLOCK_TIMEZONE
+        string "Timezone string"
+        default "CST-8"
+        help
+            POSIX 时区字符串。中国标准时间使用 CST-8。
+
+    config CLOCK_NTP_SERVER
+        string "NTP server"
+        default "ntp.aliyun.com"
+
+    config CLOCK_PROV_ENABLE
+        bool "Enable phone Wi-Fi provisioning portal"
+        default y
+
+    config CLOCK_PROV_AP_SSID_PREFIX
+        string "Provisioning AP SSID prefix"
+        default "CYD-CLOCK"
+
+    config CLOCK_PROV_AP_PASSWORD
+        string "Provisioning AP password"
+        default ""
+        help
+            留空则配网热点为开放网络，更容易触发手机系统的自动弹窗。
+            如需加密，密码长度必须至少 8 位。
+
+    config CLOCK_PROV_AP_CHANNEL
+        int "Provisioning AP channel"
+        range 1 13
+        default 6
+
+    config CLOCK_WEATHER_ENABLE
+        bool "Enable weather fetch"
+        default y
+
+    config CLOCK_WEATHER_URL
+        string "Weather URL"
+        default "http://wttr.in/?format=%25l%7C%25t%7C%25h%7C%25C"
+        help
+            默认接口通过出口 IP 自动定位，返回格式为 城市|温度|湿度|天气描述。
+
+    config CLOCK_WEATHER_CN_GEO_URL
+        string "Preferred mainland China IP geolocation URL"
+        default "http://myip.ipip.net/json"
+        help
+            优先请求国内定位接口。只有识别到中国大陆 IP 且解析出城市时，
+            才使用该城市查询天气；否则回退到 CLOCK_WEATHER_URL。
+
+    config CLOCK_WEATHER_CITY_LABEL
+        string "Weather fallback label"
+        default "天气"
+
+    config CLOCK_WEATHER_REFRESH_MINUTES
+        int "Weather refresh interval in minutes"
+        range 1 180
+        default 10
+
+    config CLOCK_TOUCH_ENABLE
+        bool "Enable XPT2046 touch controller"
+        default y
+        help
+            ESP32-2432S028R 常见触摸芯片为 XPT2046，通常使用独立 SPI 总线。
+
+    config CLOCK_TOUCH_PIN_CS
+        int "Touch CS GPIO"
+        range -1 39
+        default 33
+
+    config CLOCK_TOUCH_PIN_MOSI
+        int "Touch MOSI GPIO"
+        range -1 39
+        default 32
+
+    config CLOCK_TOUCH_PIN_MISO
+        int "Touch MISO GPIO"
+        range -1 39
+        default 39
+
+    config CLOCK_TOUCH_PIN_SCLK
+        int "Touch SCLK GPIO"
+        range -1 39
+        default 25
+
+    config CLOCK_TOUCH_PIN_IRQ
+        int "Touch IRQ GPIO, -1 if not connected"
+        range -1 39
+        default 36
+
+    config CLOCK_TOUCH_IRQ_ACTIVE_LOW
+        bool "Touch IRQ is active low"
+        default y
+
+    config CLOCK_TOUCH_SPI_CLOCK_HZ
+        int "Touch SPI clock Hz"
+        range 100000 5000000
+        default 2500000
+
+    config CLOCK_TOUCH_PRESSURE_MIN
+        int "Touch pressure minimum"
+        range 0 4095
+        default 50
+        help
+            XPT2046 压力阈值。IRQ 不可靠时用 Z1/Z2 计算压力来识别按压。
+            如果触摸仍无响应，可临时调低；如果无触摸也误触发，可调高。
+
+    config CLOCK_TOUCH_RAW_X_MIN
+        int "Touch raw X minimum"
+        range 0 4095
+        default 300
+
+    config CLOCK_TOUCH_RAW_X_MAX
+        int "Touch raw X maximum"
+        range 0 4095
+        default 3800
+
+    config CLOCK_TOUCH_RAW_Y_MIN
+        int "Touch raw Y minimum"
+        range 0 4095
+        default 300
+
+    config CLOCK_TOUCH_RAW_Y_MAX
+        int "Touch raw Y maximum"
+        range 0 4095
+        default 3800
+
+    config CLOCK_TOUCH_SWAP_XY
+        bool "Swap touch X/Y axes"
+        default y
+
+    config CLOCK_TOUCH_MIRROR_X
+        bool "Mirror touch X axis"
+        default n
+
+    config CLOCK_TOUCH_MIRROR_Y
+        bool "Mirror touch Y axis"
+        default n
+
+    config CLOCK_LCD_PIN_MOSI
+        int "LCD MOSI GPIO"
+        default 13
+
+    config CLOCK_LCD_PIN_MISO
+        int "LCD MISO GPIO"
+        default 12
+
+    config CLOCK_LCD_PIN_SCLK
+        int "LCD SCLK GPIO"
+        default 14
+
+    config CLOCK_LCD_PIN_CS
+        int "LCD CS GPIO"
+        default 15
+
+    config CLOCK_LCD_PIN_DC
+        int "LCD DC GPIO"
+        default 2
+
+    config CLOCK_LCD_PIN_RST
+        int "LCD RST GPIO, -1 if not connected"
+        default -1
+
+    config CLOCK_LCD_PIN_BACKLIGHT
+        int "LCD backlight GPIO"
+        default 21
+
+    config CLOCK_LCD_BACKLIGHT_ACTIVE_HIGH
+        bool "Backlight is active high"
+        default y
+
+    config CLOCK_LCD_BGR_ORDER
+        bool "ILI9341 uses BGR color order"
+        default y
+
+    config CLOCK_LCD_SWAP_COLOR_BYTES
+        bool "Swap RGB565 bytes before SPI transfer"
+        default y
+        help
+            ILI9341 通过 SPI 接收 RGB565 高字节在前的数据。ESP32 小端内存下通常需要启用。
+
+    config CLOCK_LCD_MIRROR_X
+        bool "Mirror LCD X axis"
+        default n
+
+    config CLOCK_LCD_MIRROR_Y
+        bool "Mirror LCD Y axis"
+        default n
+
+endmenu
