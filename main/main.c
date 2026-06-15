@@ -2170,6 +2170,87 @@ static esp_err_t draw_sun_icon(int cx, int cy, int radius, uint16_t color)
     return ESP_OK;
 }
 
+static esp_err_t draw_dashboard_weather_icon(const char *condition, int cx, int cy,
+                                             uint16_t accent, uint16_t muted)
+{
+    const uint16_t cloud = rgb565(204, 224, 238);
+    const uint16_t shade = rgb565(128, 154, 188);
+    const uint16_t rain = rgb565(72, 206, 255);
+    const uint16_t snow = rgb565(238, 250, 255);
+    const bool has_condition = condition != NULL && condition[0] != '\0' &&
+                               strstr(condition, "WAIT") == NULL &&
+                               strstr(condition, "WEATHER") == NULL;
+    const bool thunder = has_condition &&
+                         (strstr(condition, "THUNDER") != NULL || strstr(condition, "STORM") != NULL);
+    const bool rainy = has_condition &&
+                       (strstr(condition, "RAIN") != NULL || strstr(condition, "SHOWER") != NULL);
+    const bool snowy = has_condition && strstr(condition, "SNOW") != NULL;
+    const bool cloudy = has_condition &&
+                        (strstr(condition, "CLOUD") != NULL || strstr(condition, "OVERCAST") != NULL);
+    const bool foggy = has_condition &&
+                       (strstr(condition, "FOG") != NULL || strstr(condition, "MIST") != NULL ||
+                        strstr(condition, "HAZE") != NULL);
+
+    if (!has_condition) {
+        ESP_RETURN_ON_ERROR(lcd_draw_hline(cx - 7, cy - 2, 15, muted),
+                            TAG, "draw unknown weather failed");
+        return lcd_draw_hline(cx - 5, cy + 3, 11, muted);
+    }
+
+    if (!rainy && !snowy && !cloudy && !foggy && !thunder) {
+        ESP_RETURN_ON_ERROR(lcd_fill_circle(cx, cy, 5, accent), TAG, "draw dashboard sun failed");
+        for (int i = 0; i < 8; ++i) {
+            float a = (float)i * (float)M_PI / 4.0f;
+            int x0 = cx + (int)roundf(cosf(a) * 8.0f);
+            int y0 = cy + (int)roundf(sinf(a) * 8.0f);
+            int x1 = cx + (int)roundf(cosf(a) * 11.0f);
+            int y1 = cy + (int)roundf(sinf(a) * 11.0f);
+            ESP_RETURN_ON_ERROR(lcd_draw_line(x0, y0, x1, y1, 1, accent),
+                                TAG, "draw dashboard sun ray failed");
+        }
+        return ESP_OK;
+    }
+
+    // 首页右上角空间较小，云体尺寸要控制在温度文字左侧。
+    if (cloudy && !rainy && !snowy && !foggy && !thunder) {
+        ESP_RETURN_ON_ERROR(lcd_fill_circle(cx - 8, cy - 5, 4, accent),
+                            TAG, "draw dashboard cloud sun failed");
+    }
+    ESP_RETURN_ON_ERROR(lcd_fill_circle(cx - 7, cy + 2, 5, shade),
+                        TAG, "draw dashboard cloud shade failed");
+    ESP_RETURN_ON_ERROR(lcd_fill_circle(cx, cy - 2, 7, cloud),
+                        TAG, "draw dashboard cloud body failed");
+    ESP_RETURN_ON_ERROR(lcd_fill_circle(cx + 8, cy + 2, 5, cloud),
+                        TAG, "draw dashboard cloud body failed");
+    ESP_RETURN_ON_ERROR(lcd_fill_round_rect(cx - 12, cy + 2, 25, 7, 3, cloud),
+                        TAG, "draw dashboard cloud base failed");
+
+    if (thunder) {
+        return lcd_fill_triangle(cx, cy + 7, cx - 5, cy + 15, cx + 3, cy + 12,
+                                 rgb565(255, 216, 73));
+    }
+    if (rainy) {
+        ESP_RETURN_ON_ERROR(lcd_draw_line(cx - 6, cy + 10, cx - 9, cy + 15, 1, rain),
+                            TAG, "draw dashboard rain failed");
+        ESP_RETURN_ON_ERROR(lcd_draw_line(cx, cy + 10, cx - 3, cy + 16, 1, rain),
+                            TAG, "draw dashboard rain failed");
+        return lcd_draw_line(cx + 6, cy + 10, cx + 3, cy + 15, 1, rain);
+    }
+    if (snowy) {
+        ESP_RETURN_ON_ERROR(lcd_fill_circle(cx - 6, cy + 13, 1, snow),
+                            TAG, "draw dashboard snow failed");
+        ESP_RETURN_ON_ERROR(lcd_fill_circle(cx, cy + 15, 1, snow),
+                            TAG, "draw dashboard snow failed");
+        return lcd_fill_circle(cx + 6, cy + 13, 1, snow);
+    }
+    if (foggy) {
+        ESP_RETURN_ON_ERROR(lcd_draw_hline(cx - 12, cy + 11, 25, muted),
+                            TAG, "draw dashboard fog failed");
+        return lcd_draw_hline(cx - 9, cy + 15, 19, muted);
+    }
+    return ESP_OK;
+}
+
 static esp_err_t draw_card_icon(int kind, int cx, int cy, uint16_t accent)
 {
     const uint16_t icon_bg = mix_color(rgb565(8, 12, 33), accent, 2, 5);
@@ -2314,9 +2395,11 @@ static esp_err_t draw_clock_screen(const struct tm *tm)
                                                          150, 1, muted),
                         TAG, "draw center text failed");
     int temp_x = CLOCK_PANEL_X + CLOCK_PANEL_W - text5_width(temp_buf, 2) - 10;
-    int sun_x = temp_x - 18;
-    ESP_RETURN_ON_ERROR(draw_sun_icon(sun_x, CLOCK_PANEL_Y + 23, 7, yellow),
-                        TAG, "draw weather sun failed");
+    int weather_icon_x = temp_x - 18;
+    ESP_RETURN_ON_ERROR(draw_dashboard_weather_icon(weather.valid ? weather.condition : NULL,
+                                                    weather_icon_x, CLOCK_PANEL_Y + 23,
+                                                    yellow, muted),
+                        TAG, "draw dashboard weather icon failed");
     ESP_RETURN_ON_ERROR(draw_text5(temp_x, CLOCK_PANEL_Y + 17, temp_buf, 2, text),
                         TAG, "draw temperature failed");
     ESP_RETURN_ON_ERROR(draw_text_mixed_limited(CLOCK_PANEL_X + CLOCK_PANEL_W - 43,
