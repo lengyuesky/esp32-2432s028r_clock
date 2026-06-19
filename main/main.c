@@ -74,6 +74,7 @@
 #define NAV_CARD_X0 (CLOCK_PANEL_X + 14)
 #define NAV_CARD_X1 (NAV_CARD_X0 + NAV_CARD_W + NAV_CARD_GAP)
 #define NAV_CARD_X2 (NAV_CARD_X1 + NAV_CARD_W + NAV_CARD_GAP)
+#define NAV_CARD_VALUE_SCALE 2
 
 #ifndef CONFIG_CLOCK_PROV_ENABLE
 #define CONFIG_CLOCK_PROV_ENABLE 0
@@ -578,6 +579,34 @@ static esp_err_t lcd_fill_circle(int cx, int cy, int radius, uint16_t color)
         int x_span = (int)sqrtf((float)(radius * radius - y * y));
         ESP_RETURN_ON_ERROR(lcd_fill_rect(cx - x_span, cy + y, x_span * 2 + 1, 1, color), TAG,
                             "fill circle failed");
+    }
+    return ESP_OK;
+}
+
+static esp_err_t lcd_draw_arc(int cx, int cy, int radius,
+                              int start_deg, int end_deg, int thickness,
+                              uint16_t color)
+{
+    if (radius <= 0 || thickness <= 0 || start_deg == end_deg) {
+        return ESP_OK;
+    }
+
+    int step = start_deg < end_deg ? 4 : -4;
+    int deg = start_deg;
+    for (;;) {
+        float rad = (float)deg * (float)M_PI / 180.0f;
+        int px = cx + (int)roundf(cosf(rad) * radius);
+        int py = cy + (int)roundf(sinf(rad) * radius);
+        ESP_RETURN_ON_ERROR(lcd_fill_circle(px, py, thickness / 2, color), TAG,
+                            "draw arc failed");
+
+        if ((step > 0 && deg >= end_deg) || (step < 0 && deg <= end_deg)) {
+            break;
+        }
+        deg += step;
+        if ((step > 0 && deg > end_deg) || (step < 0 && deg < end_deg)) {
+            deg = end_deg;
+        }
     }
     return ESP_OK;
 }
@@ -2251,56 +2280,92 @@ static esp_err_t draw_dashboard_weather_icon(const char *condition, int cx, int 
     return ESP_OK;
 }
 
-static esp_err_t draw_card_icon(int kind, int cx, int cy, uint16_t accent)
+static uint16_t humidity_ring_color(int humidity)
+{
+    if (humidity < 0) {
+        humidity = 0;
+    } else if (humidity > 100) {
+        humidity = 100;
+    }
+
+    if (humidity <= 45) {
+        return mix_color(rgb565(45, 147, 255), rgb565(30, 226, 214), humidity, 45);
+    }
+    if (humidity <= 75) {
+        return mix_color(rgb565(30, 226, 214), rgb565(76, 235, 142), humidity - 45, 30);
+    }
+    return mix_color(rgb565(76, 235, 142), rgb565(255, 211, 85), humidity - 75, 25);
+}
+
+static esp_err_t draw_card_icon(int kind, int cx, int cy, uint16_t accent, int humidity)
 {
     const uint16_t icon_bg = mix_color(rgb565(8, 12, 33), accent, 2, 5);
     const uint16_t white = rgb565(216, 244, 255);
+    const int bg_radius = 8;
 
-    ESP_RETURN_ON_ERROR(lcd_fill_circle(cx, cy, 13, icon_bg), TAG, "draw icon bg failed");
     if (kind == 0) {
-        ESP_RETURN_ON_ERROR(lcd_draw_rect_outline(cx - 7, cy - 7, 14, 14, accent), TAG,
+        ESP_RETURN_ON_ERROR(lcd_fill_circle(cx, cy, bg_radius, icon_bg), TAG, "draw icon bg failed");
+        ESP_RETURN_ON_ERROR(lcd_draw_rect_outline(cx - 5, cy - 5, 10, 10, accent), TAG,
                             "draw clock outline failed");
-        ESP_RETURN_ON_ERROR(lcd_fill_circle(cx, cy, 2, white), TAG, "draw clock center failed");
-        ESP_RETURN_ON_ERROR(lcd_draw_line(cx, cy, cx, cy - 6, 2, white), TAG, "draw clock hand failed");
-        return lcd_draw_line(cx, cy, cx + 6, cy + 4, 2, white);
+        ESP_RETURN_ON_ERROR(lcd_fill_circle(cx, cy, 1, white), TAG, "draw clock center failed");
+        ESP_RETURN_ON_ERROR(lcd_draw_line(cx, cy, cx, cy - 4, 1, white), TAG, "draw clock hand failed");
+        return lcd_draw_line(cx, cy, cx + 4, cy + 3, 1, white);
     }
     if (kind == 1) {
-        ESP_RETURN_ON_ERROR(lcd_fill_round_rect(cx - 8, cy - 8, 16, 15, 3, accent), TAG,
+        ESP_RETURN_ON_ERROR(lcd_fill_circle(cx, cy, bg_radius, icon_bg), TAG, "draw icon bg failed");
+        ESP_RETURN_ON_ERROR(lcd_fill_round_rect(cx - 6, cy - 6, 12, 11, 2, accent), TAG,
                             "draw calendar failed");
-        ESP_RETURN_ON_ERROR(lcd_fill_rect(cx - 5, cy - 3, 10, 2, icon_bg), TAG, "draw calendar line failed");
-        ESP_RETURN_ON_ERROR(lcd_fill_rect(cx - 5, cy + 2, 8, 2, icon_bg), TAG, "draw calendar line failed");
-        ESP_RETURN_ON_ERROR(lcd_fill_rect(cx - 5, cy - 11, 3, 6, white), TAG, "draw calendar pin failed");
-        return lcd_fill_rect(cx + 3, cy - 11, 3, 6, white);
+        ESP_RETURN_ON_ERROR(lcd_fill_rect(cx - 4, cy - 2, 8, 1, icon_bg), TAG, "draw calendar line failed");
+        ESP_RETURN_ON_ERROR(lcd_fill_rect(cx - 4, cy + 2, 6, 1, icon_bg), TAG, "draw calendar line failed");
+        ESP_RETURN_ON_ERROR(lcd_fill_rect(cx - 4, cy - 9, 2, 5, white), TAG, "draw calendar pin failed");
+        return lcd_fill_rect(cx + 3, cy - 9, 2, 5, white);
     }
 
-    ESP_RETURN_ON_ERROR(lcd_fill_triangle(cx, cy - 12, cx - 8, cy + 2, cx + 8, cy + 2, accent),
+    const uint16_t ring_base = mix_color(rgb565(18, 26, 55), accent, 1, 5);
+    ESP_RETURN_ON_ERROR(lcd_fill_circle(cx, cy, bg_radius, icon_bg), TAG, "draw icon bg failed");
+    ESP_RETURN_ON_ERROR(lcd_draw_arc(cx, cy, 10, -90, 270, 2, ring_base),
+                        TAG, "draw humidity ring base failed");
+    if (humidity >= 0) {
+        if (humidity > 100) {
+            humidity = 100;
+        }
+        int sweep = (humidity * 360) / 100;
+        if (sweep > 0) {
+            ESP_RETURN_ON_ERROR(lcd_draw_arc(cx, cy, 10, -90, -90 + sweep, 2,
+                                             humidity_ring_color(humidity)),
+                                TAG, "draw humidity ring failed");
+        }
+    }
+    ESP_RETURN_ON_ERROR(lcd_fill_triangle(cx, cy - 7, cx - 5, cy + 1, cx + 5, cy + 1, accent),
                         TAG, "draw drop top failed");
-    ESP_RETURN_ON_ERROR(lcd_fill_circle(cx, cy + 3, 8, accent), TAG, "draw drop body failed");
-    return lcd_draw_line(cx + 4, cy + 7, cx + 7, cy + 3, 1, rgb565(10, 78, 92));
+    ESP_RETURN_ON_ERROR(lcd_fill_circle(cx, cy + 2, 5, accent), TAG, "draw drop body failed");
+    return lcd_draw_line(cx + 2, cy + 5, cx + 5, cy + 2, 1, rgb565(10, 78, 92));
 }
 
 static esp_err_t draw_metric_card(int x, int y, int w, int h,
                                   const char *label, const char *value,
-                                  int value_scale, uint16_t accent, int icon_kind)
+                                  int value_scale, uint16_t accent,
+                                  int icon_kind, int humidity)
 {
     const uint16_t border = mix_color(rgb565(12, 21, 50), accent, 1, 2);
     const uint16_t card = mix_color(rgb565(5, 10, 28), accent, 1, 6);
     const uint16_t label_color = rgb565(210, 225, 244);
     int scale = value_scale;
 
-    if (text5_width(value, scale) > w - 10) {
+    if (text5_width(value, scale) > w - 8) {
         scale = 1;
     }
 
     ESP_RETURN_ON_ERROR(lcd_fill_round_rect(x, y, w, h, 8, border), TAG, "draw metric card border failed");
     ESP_RETURN_ON_ERROR(lcd_fill_round_rect(x + 1, y + 1, w - 2, h - 2, 7, card),
                         TAG, "draw metric card failed");
-    ESP_RETURN_ON_ERROR(draw_card_icon(icon_kind, x + 17, y + 15, accent), TAG, "draw card icon failed");
-    ESP_RETURN_ON_ERROR(draw_text_mixed_limited(x + 35, y + 7, label, w - 39, 1, label_color),
+    ESP_RETURN_ON_ERROR(draw_card_icon(icon_kind, x + 17, y + 10, accent, humidity),
+                        TAG, "draw card icon failed");
+    ESP_RETURN_ON_ERROR(draw_text_mixed_limited(x + 32, y + 4, label, w - 36, 1, label_color),
                         TAG, "draw metric label failed");
 
     int value_x = x + (w - text5_width(value, scale)) / 2;
-    int value_y = y + h - (scale > 1 ? 18 : 13);
+    int value_y = y + h - (scale > 1 ? 16 : 12);
     if (value_x < x + 4) {
         value_x = x + 4;
     }
@@ -2319,33 +2384,34 @@ static esp_err_t draw_nav_cards(const struct tm *tm, app_view_t current_view,
     char card_time_buf[32];
     char short_date_buf[32];
     char hum_buf[16];
+    int humidity = -1;
 
-    snprintf(card_time_buf, sizeof(card_time_buf), "%02d:%02d:%02d",
-             tm->tm_hour, tm->tm_min, tm->tm_sec);
+    snprintf(card_time_buf, sizeof(card_time_buf), "%02d:%02d", tm->tm_hour, tm->tm_min);
     snprintf(short_date_buf, sizeof(short_date_buf), "%02d/%02d", tm->tm_mon + 1, tm->tm_mday);
     if (weather != NULL && weather->valid) {
         snprintf(hum_buf, sizeof(hum_buf), "%d%%", weather->humidity);
+        humidity = weather->humidity;
     } else {
         strlcpy(hum_buf, "--%", sizeof(hum_buf));
     }
 
     ESP_RETURN_ON_ERROR(draw_metric_card(NAV_CARD_X0, NAV_CARD_Y, NAV_CARD_W, NAV_CARD_H,
-                                         "时间", card_time_buf, 1,
+                                         "时间", card_time_buf, NAV_CARD_VALUE_SCALE,
                                          nav_accent(current_view, APP_VIEW_ANALOG_CLOCK,
                                                     rgb565(45, 147, 255), rgb565(105, 207, 255)),
-                                         0),
+                                         0, -1),
                         TAG, "draw time nav failed");
     ESP_RETURN_ON_ERROR(draw_metric_card(NAV_CARD_X1, NAV_CARD_Y, NAV_CARD_W, NAV_CARD_H,
-                                         "日期", short_date_buf, 2,
+                                         "日期", short_date_buf, NAV_CARD_VALUE_SCALE,
                                          nav_accent(current_view, APP_VIEW_CALENDAR,
                                                     rgb565(186, 85, 255), rgb565(227, 124, 255)),
-                                         1),
+                                         1, -1),
                         TAG, "draw date nav failed");
     return draw_metric_card(NAV_CARD_X2, NAV_CARD_Y, NAV_CARD_W, NAV_CARD_H,
-                            "湿度", hum_buf, 2,
+                            "湿度", hum_buf, NAV_CARD_VALUE_SCALE,
                             nav_accent(current_view, APP_VIEW_WEATHER,
                                        rgb565(30, 226, 214), rgb565(95, 255, 221)),
-                            2);
+                            2, humidity);
 }
 
 static esp_err_t draw_clock_screen(const struct tm *tm)
