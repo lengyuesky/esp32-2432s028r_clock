@@ -44,16 +44,18 @@ menu "CYD Clock"
 
     config CLOCK_WEATHER_URL
         string "Weather URL"
-        default "http://wttr.in/?format=%25l%7C%25t%7C%25h%7C%25C"
+        default "https://wttr.in/?format=%25l%7C%25t%7C%25h%7C%25C"
         help
             默认接口通过出口 IP 自动定位，返回格式为 城市|温度|湿度|天气描述。
+            固件会优先使用 HTTPS；如果外部服务或证书链不可用，会自动回退到 HTTP。
 
     config CLOCK_WEATHER_CN_GEO_URL
         string "Preferred mainland China IP geolocation URL"
-        default "http://myip.ipip.net/json"
+        default "https://api.live.bilibili.com/client/v1/Ip/getInfoNew"
         help
             优先请求国内定位接口。只有识别到中国大陆 IP 且解析出城市时，
             才使用该城市查询天气；否则回退到 CLOCK_WEATHER_URL。
+            固件会优先使用 HTTPS；如果外部服务或证书链不可用，会自动回退到 HTTP。
 
     config CLOCK_WEATHER_CITY_LABEL
         string "Weather fallback label"

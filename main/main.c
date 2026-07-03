@@ -13,6 +13,7 @@
 #include "driver/gpio.h"
 #include "driver/spi_master.h"
 #include "esp_check.h"
+#include "esp_crt_bundle.h"
 #include "esp_err.h"
 #include "esp_event.h"
 #include "esp_http_client.h"
@@ -25,6 +26,11 @@
 #include "esp_mac.h"
 #include "esp_netif.h"
 #include "esp_netif_sntp.h"
+#include "esp_system.h"
+#include "esp_tls_crypto.h"
+#include "esp_transport.h"
+#include "esp_transport_ssl.h"
+#include "esp_transport_tcp.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
@@ -47,23 +53,42 @@
 #define WIFI_CONNECTED_BIT BIT0
 #define WIFI_FAIL_BIT BIT1
 #define WIFI_PROV_DONE_BIT BIT2
+#define WIFI_FORCE_PROV_BIT BIT3
 #define WIFI_MAX_RETRY 8
+#define WIFI_SAVED_CREDENTIALS_RETRY_MS 60000
 #define WIFI_SSID_LEN 33
 #define WIFI_PASSWORD_LEN 65
 #define PROV_AP_IP_ADDR "192.168.4.1"
 #define PROV_HTTP_PORT 80
 #define PROV_DNS_PORT 53
 #define PROV_DNS_TASK_STACK_SIZE 4096
-#define PROV_FORM_MAX_LEN 512
+#define PROV_FORM_MAX_LEN 1024
 #define WEATHER_HTTP_BUFFER_SIZE 4096
-#define WEATHER_GEO_BUFFER_SIZE 768
+#define WEATHER_TEXT_HTTP_BUFFER_SIZE 512
+#define WEATHER_FORECAST_HTTP_BUFFER_SIZE 2048
+#define WEATHER_HOURLY_HTTP_BUFFER_SIZE 3072
+#define WEATHER_GEO_BUFFER_SIZE 1536
 #define WEATHER_URL_BUFFER_SIZE 320
 #define WEATHER_QUERY_CITY_LEN 64
 #define WEATHER_IP_LEN 48
 #define WEATHER_TEXT_LEN 32
 #define WEATHER_CITY_LEN 32
 #define WEATHER_FORECAST_DAYS 7
+#define WEATHER_HOURLY_SLOTS 24
+#define WEATHER_HOURLY_WINDOW_HOURS 24
+#define WEATHER_HOURLY_STEP_HOURS 1
+#define TODAY_HOURLY_PAGE_COUNT 2
+#define TODAY_HOURLY_ITEMS_PER_PAGE 12
 #define WEATHER_TASK_STACK_SIZE 16384
+#define KOMARI_URL_LEN 192
+#define KOMARI_HOST_LEN 96
+#define KOMARI_PATH_LEN 96
+#define KOMARI_TEXT_LEN 64
+#define KOMARI_URL_BUFFER_SIZE 256
+#define KOMARI_HTTP_BUFFER_SIZE 4096
+#define KOMARI_WS_BUFFER_SIZE 4096
+#define KOMARI_TASK_STACK_SIZE 12288
+#define KOMARI_REFRESH_MS 60000
 #define CLOCK_SNTP_SYNC_TIMEOUT_MS 30000
 #define TOUCH_SAMPLE_COUNT 5
 #define TOUCH_DEBOUNCE_TICKS pdMS_TO_TICKS(220)
@@ -75,6 +100,24 @@
 #define NAV_CARD_X1 (NAV_CARD_X0 + NAV_CARD_W + NAV_CARD_GAP)
 #define NAV_CARD_X2 (NAV_CARD_X1 + NAV_CARD_W + NAV_CARD_GAP)
 #define NAV_CARD_VALUE_SCALE 2
+#define DASHBOARD_WEATHER_HIT_X (CLOCK_PANEL_X + CLOCK_PANEL_W - 82)
+#define DASHBOARD_WEATHER_HIT_Y (CLOCK_PANEL_Y + 7)
+#define DASHBOARD_WEATHER_HIT_W 72
+#define DASHBOARD_WEATHER_HIT_H 47
+#define WIFI_STATUS_HIT_X (CLOCK_PANEL_X + 8)
+#define WIFI_STATUS_HIT_Y (CLOCK_PANEL_Y + 5)
+#define WIFI_STATUS_HIT_W 134
+#define WIFI_STATUS_HIT_H 34
+#define WIFI_CONFIRM_BOX_X (CLOCK_PANEL_X + 40)
+#define WIFI_CONFIRM_BOX_Y (CLOCK_PANEL_Y + 70)
+#define WIFI_CONFIRM_BOX_W (CLOCK_PANEL_W - 80)
+#define WIFI_CONFIRM_BOX_H 104
+#define WIFI_CONFIRM_YES_X (WIFI_CONFIRM_BOX_X + 22)
+#define WIFI_CONFIRM_YES_Y (WIFI_CONFIRM_BOX_Y + 66)
+#define WIFI_CONFIRM_BUTTON_W 72
+#define WIFI_CONFIRM_BUTTON_H 26
+#define WIFI_CONFIRM_NO_X (WIFI_CONFIRM_BOX_X + WIFI_CONFIRM_BOX_W - WIFI_CONFIRM_BUTTON_W - 22)
+#define WIFI_CONFIRM_NO_Y WIFI_CONFIRM_YES_Y
 
 #ifndef CONFIG_CLOCK_PROV_ENABLE
 #define CONFIG_CLOCK_PROV_ENABLE 0
@@ -172,9 +215,12 @@ static const char *TAG = "cyd_clock";
 
 typedef enum {
     APP_VIEW_DASHBOARD = 0,
+    APP_VIEW_TODAY_WEATHER,
+    APP_VIEW_WIFI_CONFIRM,
     APP_VIEW_ANALOG_CLOCK,
     APP_VIEW_CALENDAR,
     APP_VIEW_WEATHER,
+    APP_VIEW_KOMARI,
 } app_view_t;
 
 typedef struct {
@@ -208,12 +254,22 @@ typedef struct {
         char condition[WEATHER_TEXT_LEN];
     } forecast[WEATHER_FORECAST_DAYS];
     int forecast_count;
+    struct {
+        bool valid;
+        int temp_c;
+        int humidity;
+        int weather_code;
+        char time[6];
+        char condition[WEATHER_TEXT_LEN];
+    } hourly[WEATHER_HOURLY_SLOTS];
+    int hourly_count;
 } weather_info_t;
 
 typedef struct {
     char *data;
     int len;
     int cap;
+    bool truncated;
 } weather_http_buffer_t;
 
 typedef struct {
@@ -233,6 +289,31 @@ typedef struct {
 } wifi_credentials_t;
 
 typedef struct {
+    bool configured;
+    bool valid;
+    bool public_valid;
+    bool nodes_valid;
+    bool online_valid;
+    int online_count;
+    int node_count;
+    bool private_site;
+    bool record_enabled;
+    time_t updated_at;
+    char sitename[KOMARI_TEXT_LEN];
+    char description[KOMARI_TEXT_LEN];
+    char theme[24];
+    char version[24];
+    char base_url[KOMARI_URL_LEN];
+} komari_info_t;
+
+typedef struct {
+    bool https;
+    char host[KOMARI_HOST_LEN];
+    int port;
+    char path[KOMARI_PATH_LEN];
+} komari_url_parts_t;
+
+typedef struct {
     spi_device_handle_t spi;
     bool initialized;
     bool was_pressed;
@@ -243,7 +324,11 @@ static lcd_context_t s_lcd;
 static touch_context_t s_touch;
 static EventGroupHandle_t s_wifi_event_group;
 static SemaphoreHandle_t s_weather_lock;
+static SemaphoreHandle_t s_komari_lock;
+static SemaphoreHandle_t s_network_fetch_lock;
 static weather_info_t s_weather;
+static komari_info_t s_komari;
+static char s_komari_base_url[KOMARI_URL_LEN];
 static esp_netif_t *s_sta_netif;
 static esp_netif_t *s_ap_netif;
 static httpd_handle_t s_prov_httpd;
@@ -253,15 +338,124 @@ static char s_connected_ssid[WIFI_SSID_LEN];
 static int s_wifi_retry_count;
 static bool s_wifi_started;
 static bool s_weather_task_started;
+static bool s_komari_task_started;
 static volatile bool s_wifi_configured;
 static volatile bool s_wifi_connected;
 static volatile bool s_sta_retry_enabled;
 static volatile bool s_prov_active;
 static volatile bool s_prov_dns_running;
 static volatile bool s_time_synced;
+static volatile bool s_wifi_force_prov_pending;
 static app_view_t s_current_view = APP_VIEW_DASHBOARD;
+static int s_today_hourly_page;
 
 static const char s_captive_portal_uri[] = "http://" PROV_AP_IP_ADDR "/";
+
+static const char *reset_reason_name(esp_reset_reason_t reason)
+{
+    switch (reason) {
+    case ESP_RST_POWERON:
+        return "poweron";
+    case ESP_RST_EXT:
+        return "external";
+    case ESP_RST_SW:
+        return "software";
+    case ESP_RST_PANIC:
+        return "panic";
+    case ESP_RST_INT_WDT:
+        return "interrupt-wdt";
+    case ESP_RST_TASK_WDT:
+        return "task-wdt";
+    case ESP_RST_WDT:
+        return "watchdog";
+    case ESP_RST_DEEPSLEEP:
+        return "deepsleep";
+    case ESP_RST_BROWNOUT:
+        return "brownout";
+    case ESP_RST_SDIO:
+        return "sdio";
+    case ESP_RST_USB:
+        return "usb";
+    case ESP_RST_JTAG:
+        return "jtag";
+    case ESP_RST_EFUSE:
+        return "efuse";
+    case ESP_RST_PWR_GLITCH:
+        return "power-glitch";
+    case ESP_RST_CPU_LOCKUP:
+        return "cpu-lockup";
+    case ESP_RST_UNKNOWN:
+    default:
+        return "unknown";
+    }
+}
+
+static void log_runtime_health(const char *scope)
+{
+    ESP_LOGI(TAG, "%s health: heap_free=%u heap_min=%u heap_largest=%u stack_free=%u",
+             scope != NULL ? scope : "runtime",
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
+             (unsigned)uxTaskGetStackHighWaterMark(NULL));
+}
+
+static esp_err_t network_fetch_lock_init(void)
+{
+    s_network_fetch_lock = xSemaphoreCreateMutex();
+    ESP_RETURN_ON_FALSE(s_network_fetch_lock != NULL, ESP_ERR_NO_MEM, TAG,
+                        "create network fetch lock failed");
+    return ESP_OK;
+}
+
+static bool network_fetch_lock_take(const char *scope, TickType_t timeout)
+{
+    if (s_network_fetch_lock == NULL) {
+        return true;
+    }
+    if (xSemaphoreTake(s_network_fetch_lock, timeout) == pdTRUE) {
+        return true;
+    }
+    ESP_LOGW(TAG, "%s network fetch lock timeout", scope != NULL ? scope : "network");
+    return false;
+}
+
+static void network_fetch_lock_give(void)
+{
+    if (s_network_fetch_lock != NULL) {
+        xSemaphoreGive(s_network_fetch_lock);
+    }
+}
+
+static void request_wifi_reprovision(void)
+{
+    if (s_prov_active) {
+        ESP_LOGI(TAG, "manual provisioning request ignored: provisioning already active");
+        return;
+    }
+
+    s_wifi_force_prov_pending = true;
+    if (s_wifi_event_group != NULL) {
+        xEventGroupSetBits(s_wifi_event_group, WIFI_FORCE_PROV_BIT);
+    }
+    ESP_LOGI(TAG, "manual provisioning requested from touch");
+}
+
+static bool wifi_reprovision_request_take(void)
+{
+    bool requested = s_wifi_force_prov_pending;
+    if (s_wifi_event_group != NULL) {
+        EventBits_t bits = xEventGroupGetBits(s_wifi_event_group);
+        if (bits & WIFI_FORCE_PROV_BIT) {
+            requested = true;
+            xEventGroupClearBits(s_wifi_event_group, WIFI_FORCE_PROV_BIT);
+        }
+    }
+    if (requested) {
+        s_wifi_force_prov_pending = false;
+    }
+    return requested;
+}
 
 static uint16_t rgb565(uint8_t r, uint8_t g, uint8_t b)
 {
@@ -1156,6 +1350,7 @@ static esp_err_t weather_state_init(void)
     s_weather.humidity = 0;
     s_weather.updated_at = 0;
     s_weather.forecast_count = 0;
+    s_weather.hourly_count = 0;
     s_weather.city[0] = '\0';
     strlcpy(s_weather.condition, "WAIT", sizeof(s_weather.condition));
     return ESP_OK;
@@ -1200,6 +1395,299 @@ static char *trim_ascii(char *text)
         *end = '\0';
     }
     return text;
+}
+
+static bool ascii_starts_with_ignore_case(const char *text, const char *prefix)
+{
+    if (text == NULL || prefix == NULL) {
+        return false;
+    }
+
+    while (*prefix != '\0') {
+        if (*text == '\0' || tolower((unsigned char)*text) != tolower((unsigned char)*prefix)) {
+            return false;
+        }
+        ++text;
+        ++prefix;
+    }
+    return true;
+}
+
+static bool komari_parse_base_url(const char *base_url, komari_url_parts_t *parts)
+{
+    if (base_url == NULL || parts == NULL) {
+        return false;
+    }
+
+    memset(parts, 0, sizeof(*parts));
+    const char *authority = NULL;
+    if (strncmp(base_url, "https://", 8) == 0) {
+        parts->https = true;
+        parts->port = 443;
+        authority = base_url + 8;
+    } else if (strncmp(base_url, "http://", 7) == 0) {
+        parts->https = false;
+        parts->port = 80;
+        authority = base_url + 7;
+    } else {
+        return false;
+    }
+
+    const char *path = strchr(authority, '/');
+    size_t authority_len = path != NULL ? (size_t)(path - authority) : strlen(authority);
+    if (authority_len == 0 || authority_len >= KOMARI_HOST_LEN) {
+        return false;
+    }
+
+    char host_port[KOMARI_HOST_LEN] = {0};
+    memcpy(host_port, authority, authority_len);
+    host_port[authority_len] = '\0';
+
+    char *port_text = strrchr(host_port, ':');
+    if (port_text != NULL && port_text[1] != '\0') {
+        bool numeric_port = true;
+        for (char *p = port_text + 1; *p != '\0'; ++p) {
+            if (!isdigit((unsigned char)*p)) {
+                numeric_port = false;
+                break;
+            }
+        }
+        if (numeric_port) {
+            long parsed_port = strtol(port_text + 1, NULL, 10);
+            if (parsed_port <= 0 || parsed_port > 65535) {
+                return false;
+            }
+            *port_text = '\0';
+            parts->port = (int)parsed_port;
+        }
+    }
+
+    if (host_port[0] == '\0') {
+        return false;
+    }
+    for (const char *p = host_port; *p != '\0'; ++p) {
+        if (isspace((unsigned char)*p)) {
+            return false;
+        }
+    }
+    strlcpy(parts->host, host_port, sizeof(parts->host));
+
+    if (path != NULL && path[0] != '\0') {
+        strlcpy(parts->path, path, sizeof(parts->path));
+        char *query = strpbrk(parts->path, "?#");
+        if (query != NULL) {
+            *query = '\0';
+        }
+        size_t path_len = strlen(parts->path);
+        while (path_len > 1 && parts->path[path_len - 1] == '/') {
+            parts->path[--path_len] = '\0';
+        }
+        if (strcmp(parts->path, "/") == 0) {
+            parts->path[0] = '\0';
+        }
+    }
+    return true;
+}
+
+static bool komari_normalize_url(const char *input, char *output, size_t output_len)
+{
+    if (output == NULL || output_len == 0) {
+        return false;
+    }
+    output[0] = '\0';
+
+    if (input == NULL) {
+        return true;
+    }
+
+    char scratch[KOMARI_URL_LEN] = {0};
+    if (strlcpy(scratch, input, sizeof(scratch)) >= sizeof(scratch)) {
+        return false;
+    }
+    char *trimmed = trim_ascii(scratch);
+    if (trimmed[0] == '\0') {
+        return true;
+    }
+    for (const char *p = trimmed; *p != '\0'; ++p) {
+        if (isspace((unsigned char)*p)) {
+            return false;
+        }
+    }
+
+    char normalized[KOMARI_URL_LEN] = {0};
+    int written = 0;
+    if (ascii_starts_with_ignore_case(trimmed, "https://")) {
+        written = snprintf(normalized, sizeof(normalized), "https://%s", trimmed + 8);
+    } else if (ascii_starts_with_ignore_case(trimmed, "http://")) {
+        written = snprintf(normalized, sizeof(normalized), "http://%s", trimmed + 7);
+    } else if (strstr(trimmed, "://") == NULL) {
+        written = snprintf(normalized, sizeof(normalized), "https://%s", trimmed);
+    } else {
+        return false;
+    }
+    if (written <= 0 || (size_t)written >= sizeof(normalized)) {
+        return false;
+    }
+
+    char *query = strpbrk(normalized, "?#");
+    if (query != NULL) {
+        *query = '\0';
+    }
+    size_t len = strlen(normalized);
+    while (len > 0 && normalized[len - 1] == '/') {
+        normalized[--len] = '\0';
+    }
+
+    komari_url_parts_t parts = {0};
+    if (!komari_parse_base_url(normalized, &parts)) {
+        return false;
+    }
+    return strlcpy(output, normalized, output_len) < output_len;
+}
+
+static void komari_reset_info_locked(const char *base_url)
+{
+    memset(&s_komari, 0, sizeof(s_komari));
+    s_komari.configured = base_url != NULL && base_url[0] != '\0';
+    s_komari.online_count = -1;
+    s_komari.node_count = -1;
+    strlcpy(s_komari.sitename, "--", sizeof(s_komari.sitename));
+    strlcpy(s_komari.description, "--", sizeof(s_komari.description));
+    strlcpy(s_komari.theme, "--", sizeof(s_komari.theme));
+    strlcpy(s_komari.version, "--", sizeof(s_komari.version));
+    if (base_url != NULL) {
+        strlcpy(s_komari.base_url, base_url, sizeof(s_komari.base_url));
+    }
+}
+
+static esp_err_t komari_state_init(void)
+{
+    s_komari_lock = xSemaphoreCreateMutex();
+    ESP_RETURN_ON_FALSE(s_komari_lock != NULL, ESP_ERR_NO_MEM, TAG, "create Komari lock failed");
+    s_komari_base_url[0] = '\0';
+    komari_reset_info_locked("");
+    return ESP_OK;
+}
+
+static void komari_get_snapshot(komari_info_t *out)
+{
+    if (out == NULL) {
+        return;
+    }
+
+    if (s_komari_lock != NULL && xSemaphoreTake(s_komari_lock, pdMS_TO_TICKS(10)) == pdTRUE) {
+        *out = s_komari;
+        xSemaphoreGive(s_komari_lock);
+        return;
+    }
+    *out = s_komari;
+}
+
+static void komari_set_snapshot(const komari_info_t *info)
+{
+    if (info == NULL) {
+        return;
+    }
+
+    if (s_komari_lock != NULL && xSemaphoreTake(s_komari_lock, pdMS_TO_TICKS(1000)) == pdTRUE) {
+        if (strcmp(info->base_url, s_komari_base_url) == 0) {
+            s_komari = *info;
+            s_komari.configured = s_komari_base_url[0] != '\0';
+        }
+        xSemaphoreGive(s_komari_lock);
+    }
+}
+
+static bool komari_configured(void)
+{
+    bool configured = false;
+    if (s_komari_lock != NULL && xSemaphoreTake(s_komari_lock, pdMS_TO_TICKS(10)) == pdTRUE) {
+        configured = s_komari_base_url[0] != '\0';
+        xSemaphoreGive(s_komari_lock);
+        return configured;
+    }
+    return s_komari_base_url[0] != '\0';
+}
+
+static bool komari_get_base_url(char *out, size_t out_len)
+{
+    if (out == NULL || out_len == 0) {
+        return false;
+    }
+
+    if (s_komari_lock != NULL && xSemaphoreTake(s_komari_lock, pdMS_TO_TICKS(100)) == pdTRUE) {
+        strlcpy(out, s_komari_base_url, out_len);
+        xSemaphoreGive(s_komari_lock);
+    } else {
+        strlcpy(out, s_komari_base_url, out_len);
+    }
+    return out[0] != '\0';
+}
+
+static void komari_apply_base_url(const char *base_url)
+{
+    if (s_komari_lock != NULL && xSemaphoreTake(s_komari_lock, pdMS_TO_TICKS(1000)) == pdTRUE) {
+        strlcpy(s_komari_base_url, base_url != NULL ? base_url : "", sizeof(s_komari_base_url));
+        komari_reset_info_locked(s_komari_base_url);
+        xSemaphoreGive(s_komari_lock);
+        return;
+    }
+
+    strlcpy(s_komari_base_url, base_url != NULL ? base_url : "", sizeof(s_komari_base_url));
+    komari_reset_info_locked(s_komari_base_url);
+}
+
+static esp_err_t komari_config_load(void)
+{
+    char stored[KOMARI_URL_LEN] = {0};
+    nvs_handle_t nvs = 0;
+    esp_err_t ret = nvs_open("komari_cfg", NVS_READONLY, &nvs);
+    if (ret == ESP_ERR_NVS_NOT_FOUND) {
+        komari_apply_base_url("");
+        ESP_LOGI(TAG, "Komari URL is not configured");
+        return ESP_OK;
+    }
+    ESP_RETURN_ON_ERROR(ret, TAG, "open Komari NVS failed");
+
+    size_t len = sizeof(stored);
+    ret = nvs_get_str(nvs, "url", stored, &len);
+    nvs_close(nvs);
+    if (ret == ESP_ERR_NVS_NOT_FOUND) {
+        komari_apply_base_url("");
+        ESP_LOGI(TAG, "Komari URL is not configured");
+        return ESP_OK;
+    }
+    ESP_RETURN_ON_ERROR(ret, TAG, "read Komari URL failed");
+
+    char normalized[KOMARI_URL_LEN] = {0};
+    if (!komari_normalize_url(stored, normalized, sizeof(normalized))) {
+        ESP_LOGW(TAG, "ignore invalid saved Komari URL");
+        komari_apply_base_url("");
+        return ESP_OK;
+    }
+    komari_apply_base_url(normalized);
+    ESP_LOGI(TAG, "Komari URL loaded: %s", normalized[0] != '\0' ? normalized : "not configured");
+    return ESP_OK;
+}
+
+static esp_err_t komari_config_save(const char *base_url)
+{
+    char normalized[KOMARI_URL_LEN] = {0};
+    ESP_RETURN_ON_FALSE(komari_normalize_url(base_url, normalized, sizeof(normalized)),
+                        ESP_ERR_INVALID_ARG, TAG, "invalid Komari URL");
+
+    nvs_handle_t nvs = 0;
+    ESP_RETURN_ON_ERROR(nvs_open("komari_cfg", NVS_READWRITE, &nvs), TAG, "open Komari NVS failed");
+    esp_err_t ret = nvs_set_str(nvs, "url", normalized);
+    if (ret == ESP_OK) {
+        ret = nvs_commit(nvs);
+    }
+    nvs_close(nvs);
+    ESP_RETURN_ON_ERROR(ret, TAG, "save Komari URL failed");
+
+    komari_apply_base_url(normalized);
+    ESP_LOGI(TAG, "saved Komari URL: %s", normalized[0] != '\0' ? normalized : "not configured");
+    return ESP_OK;
 }
 
 static bool parse_first_int(const char *text, int *value)
@@ -1599,7 +2087,7 @@ static bool weather_build_city_url(const char *city_query, char *url, size_t url
     }
 
     int written = snprintf(url, url_len,
-                           "http://wttr.in/%s?format=%%25l%%7C%%25t%%7C%%25h%%7C%%25C",
+                           "https://wttr.in/%s?format=%%25l%%7C%%25t%%7C%%25h%%7C%%25C",
                            encoded_city);
     return written > 0 && (size_t)written < url_len;
 }
@@ -1612,7 +2100,7 @@ static bool weather_build_open_meteo_geocode_url(const char *city_query, char *u
     }
 
     int written = snprintf(url, url_len,
-                           "http://geocoding-api.open-meteo.com/v1/search?name=%s&count=10&language=zh&format=json",
+                           "https://geocoding-api.open-meteo.com/v1/search?name=%s&count=10&language=zh&format=json",
                            encoded_city);
     return written > 0 && (size_t)written < url_len;
 }
@@ -1621,11 +2109,32 @@ static bool weather_build_open_meteo_forecast_url(double latitude, double longit
                                                   char *url, size_t url_len)
 {
     int written = snprintf(url, url_len,
-                           "http://api.open-meteo.com/v1/forecast?latitude=%.5f&longitude=%.5f"
+                           "https://api.open-meteo.com/v1/forecast?latitude=%.5f&longitude=%.5f"
                            "&current=temperature_2m,relative_humidity_2m,weather_code"
                            "&daily=weather_code,temperature_2m_max,temperature_2m_min"
                            "&forecast_days=7&timezone=auto",
                            latitude, longitude);
+    return written > 0 && (size_t)written < url_len;
+}
+
+static bool weather_build_open_meteo_hourly_url(double latitude, double longitude,
+                                                char *url, size_t url_len)
+{
+    int written = snprintf(url, url_len,
+                           "https://api.open-meteo.com/v1/forecast?latitude=%.5f&longitude=%.5f"
+                           "&hourly=temperature_2m,relative_humidity_2m,weather_code"
+                           "&forecast_days=2&timezone=auto",
+                           latitude, longitude);
+    return written > 0 && (size_t)written < url_len;
+}
+
+static bool weather_build_7timer_forecast_url(double latitude, double longitude,
+                                              char *url, size_t url_len)
+{
+    int written = snprintf(url, url_len,
+                           "https://www.7timer.info/bin/api.pl?lon=%.5f&lat=%.5f"
+                           "&product=civillight&output=json",
+                           longitude, latitude);
     return written > 0 && (size_t)written < url_len;
 }
 
@@ -1673,6 +2182,66 @@ static const char *weather_condition_from_wmo(int code)
         return "THUNDER";
     }
     return "WEATHER";
+}
+
+static const char *weather_condition_from_7timer(const char *code)
+{
+    if (code == NULL) {
+        return "WEATHER";
+    }
+    if (ascii_equals_ignore_case(code, "ts")) {
+        return "THUNDER";
+    }
+    if (strstr(code, "rain") != NULL || strstr(code, "shower") != NULL) {
+        return "RAIN";
+    }
+    if (strstr(code, "snow") != NULL) {
+        return "SNOW";
+    }
+    if (strstr(code, "fog") != NULL || strstr(code, "humid") != NULL) {
+        return "FOG";
+    }
+    if (strstr(code, "cloud") != NULL) {
+        return "CLOUD";
+    }
+    if (strstr(code, "clear") != NULL) {
+        return "CLEAR";
+    }
+    return "WEATHER";
+}
+
+static bool weather_format_yyyymmdd(int date, char *out, size_t out_len)
+{
+    if (out == NULL || out_len == 0) {
+        return false;
+    }
+
+    int year = date / 10000;
+    int month = (date / 100) % 100;
+    int day = date % 100;
+    if (year < 2020 || month < 1 || month > 12 || day < 1 || day > 31) {
+        out[0] = '\0';
+        return false;
+    }
+
+    int written = snprintf(out, out_len, "%04d-%02d-%02d", year, month, day);
+    return written > 0 && (size_t)written < out_len;
+}
+
+static void weather_copy_forecast(weather_info_t *dest, const weather_info_t *src)
+{
+    if (dest == NULL || src == NULL || src->forecast_count <= 0) {
+        return;
+    }
+
+    int count = src->forecast_count;
+    if (count > WEATHER_FORECAST_DAYS) {
+        count = WEATHER_FORECAST_DAYS;
+    }
+    for (int i = 0; i < count; ++i) {
+        dest->forecast[i] = src->forecast[i];
+    }
+    dest->forecast_count = count;
 }
 
 static int weather_geocode_score(cJSON *result, const weather_geo_info_t *geo)
@@ -1836,6 +2405,197 @@ static bool weather_parse_open_meteo_forecast_response(const char *response, wea
     return true;
 }
 
+static bool weather_parse_hourly_time(const char *time_text, time_t *timestamp,
+                                      int *hour, int *minute)
+{
+    if (time_text == NULL || timestamp == NULL || hour == NULL || minute == NULL) {
+        return false;
+    }
+
+    int year = 0;
+    int month = 0;
+    int day = 0;
+    int parsed_hour = 0;
+    int parsed_minute = 0;
+    if (sscanf(time_text, "%d-%d-%dT%d:%d", &year, &month, &day,
+               &parsed_hour, &parsed_minute) != 5) {
+        return false;
+    }
+
+    if (year < 2020 ||
+        month < 1 || month > 12 ||
+        day < 1 || day > 31 ||
+        parsed_hour < 0 || parsed_hour > 23 ||
+        parsed_minute < 0 || parsed_minute > 59) {
+        return false;
+    }
+
+    struct tm parsed = {
+        .tm_year = year - 1900,
+        .tm_mon = month - 1,
+        .tm_mday = day,
+        .tm_hour = parsed_hour,
+        .tm_min = parsed_minute,
+        .tm_sec = 0,
+        .tm_isdst = -1,
+    };
+    time_t parsed_time = mktime(&parsed);
+    if (parsed_time == (time_t)-1) {
+        return false;
+    }
+
+    *timestamp = parsed_time;
+    *hour = parsed_hour;
+    *minute = parsed_minute;
+    return true;
+}
+
+static bool weather_parse_open_meteo_hourly_response(const char *response, weather_info_t *out)
+{
+    if (response == NULL || out == NULL) {
+        return false;
+    }
+
+    cJSON *root = cJSON_Parse(response);
+    if (root == NULL) {
+        return false;
+    }
+
+    cJSON *hourly = cJSON_GetObjectItemCaseSensitive(root, "hourly");
+    if (!cJSON_IsObject(hourly)) {
+        cJSON_Delete(root);
+        return false;
+    }
+
+    cJSON *times = cJSON_GetObjectItemCaseSensitive(hourly, "time");
+    cJSON *temps = cJSON_GetObjectItemCaseSensitive(hourly, "temperature_2m");
+    cJSON *humidity_values = cJSON_GetObjectItemCaseSensitive(hourly, "relative_humidity_2m");
+    cJSON *codes = cJSON_GetObjectItemCaseSensitive(hourly, "weather_code");
+    if (!cJSON_IsArray(times) || !cJSON_IsArray(temps) ||
+        !cJSON_IsArray(humidity_values) || !cJSON_IsArray(codes)) {
+        cJSON_Delete(root);
+        return false;
+    }
+
+    time_t now = 0;
+    time(&now);
+    struct tm start_tm = {0};
+    localtime_r(&now, &start_tm);
+    start_tm.tm_min = 0;
+    start_tm.tm_sec = 0;
+    start_tm.tm_isdst = -1;
+    time_t start_time = mktime(&start_tm);
+    if (start_time == (time_t)-1) {
+        cJSON_Delete(root);
+        return false;
+    }
+    time_t end_time = start_time + WEATHER_HOURLY_WINDOW_HOURS * 60 * 60;
+
+    out->hourly_count = 0;
+    time_t last_time = start_time - WEATHER_HOURLY_STEP_HOURS * 60 * 60;
+    int count = cJSON_GetArraySize(times);
+    for (int i = 0; i < count && out->hourly_count < WEATHER_HOURLY_SLOTS; ++i) {
+        const char *time_text = json_array_string(times, i);
+        time_t hourly_time = 0;
+        int hour = 0;
+        int minute = 0;
+        int temp_c = 0;
+        int humidity = 0;
+        int code = 0;
+        if (!weather_parse_hourly_time(time_text, &hourly_time, &hour, &minute) ||
+            hourly_time < start_time ||
+            hourly_time >= end_time ||
+            !json_array_int(temps, i, &temp_c) ||
+            !json_array_int(humidity_values, i, &humidity) ||
+            !json_array_int(codes, i, &code)) {
+            continue;
+        }
+
+        if (out->hourly_count > 0 &&
+            (hourly_time - last_time) < WEATHER_HOURLY_STEP_HOURS * 60 * 60) {
+            continue;
+        }
+
+        int idx = out->hourly_count++;
+        out->hourly[idx].valid = true;
+        out->hourly[idx].temp_c = temp_c;
+        out->hourly[idx].humidity = humidity;
+        out->hourly[idx].weather_code = code;
+        snprintf(out->hourly[idx].time, sizeof(out->hourly[idx].time),
+                 "%02d:%02d", hour, minute);
+        strlcpy(out->hourly[idx].condition, weather_condition_from_wmo(code),
+                sizeof(out->hourly[idx].condition));
+        last_time = hourly_time;
+    }
+
+    cJSON_Delete(root);
+    return out->hourly_count > 0;
+}
+
+static bool weather_parse_7timer_forecast_response(const char *response, weather_info_t *out)
+{
+    if (response == NULL || out == NULL) {
+        return false;
+    }
+
+    cJSON *root = cJSON_Parse(response);
+    if (root == NULL) {
+        return false;
+    }
+
+    cJSON *dataseries = cJSON_GetObjectItemCaseSensitive(root, "dataseries");
+    if (!cJSON_IsArray(dataseries)) {
+        cJSON_Delete(root);
+        return false;
+    }
+
+    out->forecast_count = 0;
+    int count = cJSON_GetArraySize(dataseries);
+    if (count > WEATHER_FORECAST_DAYS) {
+        count = WEATHER_FORECAST_DAYS;
+    }
+
+    for (int i = 0; i < count; ++i) {
+        cJSON *item = cJSON_GetArrayItem(dataseries, i);
+        if (!cJSON_IsObject(item)) {
+            continue;
+        }
+
+        int date = 0;
+        if (!json_value_to_int(cJSON_GetObjectItemCaseSensitive(item, "date"), &date)) {
+            continue;
+        }
+
+        cJSON *temp2m = cJSON_GetObjectItemCaseSensitive(item, "temp2m");
+        int max_c = 0;
+        int min_c = 0;
+        if (!cJSON_IsObject(temp2m) ||
+            !json_value_to_int(cJSON_GetObjectItemCaseSensitive(temp2m, "max"), &max_c) ||
+            !json_value_to_int(cJSON_GetObjectItemCaseSensitive(temp2m, "min"), &min_c)) {
+            continue;
+        }
+
+        const char *condition = json_string_item(item, "weather");
+        weather_info_t *info = out;
+        int idx = info->forecast_count++;
+        info->forecast[idx].valid = true;
+        info->forecast[idx].weather_code = -1;
+        info->forecast[idx].min_c = min_c;
+        info->forecast[idx].max_c = max_c;
+        if (!weather_format_yyyymmdd(date, info->forecast[idx].date,
+                                     sizeof(info->forecast[idx].date))) {
+            info->forecast[idx].valid = false;
+            --info->forecast_count;
+            continue;
+        }
+        strlcpy(info->forecast[idx].condition, weather_condition_from_7timer(condition),
+                sizeof(info->forecast[idx].condition));
+    }
+
+    cJSON_Delete(root);
+    return out->forecast_count > 0;
+}
+
 static const char *weather_condition_zh(const char *condition)
 {
     if (condition == NULL) {
@@ -1863,17 +2623,14 @@ static const char *weather_condition_zh(const char *condition)
     return "天气";
 }
 
-static bool weather_parse_response(const char *response, weather_info_t *out)
+static bool weather_parse_response(char *response, weather_info_t *out)
 {
     if (response == NULL || out == NULL) {
         return false;
     }
 
-    char buf[WEATHER_HTTP_BUFFER_SIZE] = {0};
-    strlcpy(buf, response, sizeof(buf));
-
     char *saveptr = NULL;
-    char *first_text = strtok_r(buf, "|", &saveptr);
+    char *first_text = strtok_r(response, "|", &saveptr);
     char *second_text = strtok_r(NULL, "|", &saveptr);
     char *third_text = strtok_r(NULL, "|", &saveptr);
     char *fourth_text = strtok_r(NULL, "|", &saveptr);
@@ -1925,12 +2682,14 @@ static esp_err_t weather_http_event_handler(esp_http_client_event_t *evt)
 
     int remain = buffer->cap - buffer->len - 1;
     if (remain <= 0) {
+        buffer->truncated = true;
         return ESP_OK;
     }
 
     int copy_len = evt->data_len;
     if (copy_len > remain) {
         copy_len = remain;
+        buffer->truncated = true;
     }
     memcpy(buffer->data + buffer->len, evt->data, (size_t)copy_len);
     buffer->len += copy_len;
@@ -1938,7 +2697,8 @@ static esp_err_t weather_http_event_handler(esp_http_client_event_t *evt)
     return ESP_OK;
 }
 
-static esp_err_t http_get_text(const char *url, char *response, size_t response_len, const char *label)
+static esp_err_t http_get_text_once(const char *url, char *response, size_t response_len,
+                                    const char *label)
 {
     ESP_RETURN_ON_FALSE(url != NULL && url[0] != '\0', ESP_ERR_INVALID_ARG, TAG, "invalid HTTP URL");
     ESP_RETURN_ON_FALSE(response != NULL && response_len > 1, ESP_ERR_INVALID_ARG, TAG, "invalid HTTP buffer");
@@ -1958,6 +2718,7 @@ static esp_err_t http_get_text(const char *url, char *response, size_t response_
         .user_data = &buffer,
         .user_agent = "esp32-cyd-clock",
         .disable_auto_redirect = true,
+        .crt_bundle_attach = esp_crt_bundle_attach,
     };
 
     esp_http_client_handle_t client = esp_http_client_init(&config);
@@ -1966,9 +2727,14 @@ static esp_err_t http_get_text(const char *url, char *response, size_t response_
     esp_err_t ret = esp_http_client_perform(client);
     int status = esp_http_client_get_status_code(client);
 
+    if (buffer.truncated && ret == ESP_OK) {
+        ret = ESP_ERR_INVALID_SIZE;
+    }
+
     if (ret != ESP_OK || status < 200 || status >= 300 || buffer.len <= 0) {
-        ESP_LOGW(TAG, "%s HTTP failed: ret=%s status=%d len=%d url=%s",
-                 label != NULL ? label : "http", esp_err_to_name(ret), status, buffer.len, url);
+        ESP_LOGW(TAG, "%s HTTP failed: ret=%s status=%d len=%d truncated=%d url=%s",
+                 label != NULL ? label : "http", esp_err_to_name(ret), status,
+                 buffer.len, buffer.truncated, url);
         if (ret == ESP_OK) {
             ret = ESP_ERR_INVALID_RESPONSE;
         }
@@ -1978,27 +2744,975 @@ static esp_err_t http_get_text(const char *url, char *response, size_t response_
     return ret;
 }
 
+static bool http_build_insecure_fallback_url(const char *url, char *fallback_url,
+                                             size_t fallback_url_len)
+{
+    const char https_scheme[] = "https://";
+    const char http_scheme[] = "http://";
+
+    if (url == NULL || fallback_url == NULL ||
+        strncmp(url, https_scheme, strlen(https_scheme)) != 0) {
+        return false;
+    }
+
+    int written = snprintf(fallback_url, fallback_url_len, "%s%s",
+                           http_scheme, url + strlen(https_scheme));
+    return written > 0 && (size_t)written < fallback_url_len;
+}
+
+static esp_err_t http_get_text(const char *url, char *response, size_t response_len,
+                               const char *label)
+{
+    esp_err_t ret = http_get_text_once(url, response, response_len, label);
+    if (ret == ESP_OK || url == NULL || strncmp(url, "https://", 8) != 0) {
+        return ret;
+    }
+
+    char fallback_url[WEATHER_URL_BUFFER_SIZE] = {0};
+    if (!http_build_insecure_fallback_url(url, fallback_url, sizeof(fallback_url))) {
+        return ret;
+    }
+
+    ESP_LOGW(TAG, "%s HTTPS failed, fallback to HTTP: %s",
+             label != NULL ? label : "http", esp_err_to_name(ret));
+    return http_get_text_once(fallback_url, response, response_len, label);
+}
+
+static void komari_set_default_text(komari_info_t *info)
+{
+    if (info == NULL) {
+        return;
+    }
+    strlcpy(info->sitename, "--", sizeof(info->sitename));
+    strlcpy(info->description, "--", sizeof(info->description));
+    strlcpy(info->theme, "--", sizeof(info->theme));
+    strlcpy(info->version, "--", sizeof(info->version));
+}
+
+static void komari_copy_text(const char *value, char *out, size_t out_len)
+{
+    if (out == NULL || out_len == 0) {
+        return;
+    }
+    if (value == NULL || value[0] == '\0') {
+        strlcpy(out, "--", out_len);
+        return;
+    }
+    strlcpy(out, value, out_len);
+}
+
+static bool komari_json_bool(cJSON *object, const char *key, bool *value)
+{
+    if (object == NULL || key == NULL || value == NULL) {
+        return false;
+    }
+
+    cJSON *item = cJSON_GetObjectItemCaseSensitive(object, key);
+    if (cJSON_IsBool(item)) {
+        *value = cJSON_IsTrue(item);
+        return true;
+    }
+    if (cJSON_IsNumber(item)) {
+        *value = item->valuedouble != 0.0;
+        return true;
+    }
+    if (cJSON_IsString(item) && item->valuestring != NULL) {
+        *value = ascii_equals_ignore_case(item->valuestring, "true") ||
+                 strcmp(item->valuestring, "1") == 0 ||
+                 ascii_equals_ignore_case(item->valuestring, "yes");
+        return true;
+    }
+    return false;
+}
+
+static bool komari_build_api_url(const char *base_url, const char *api_path,
+                                 char *url, size_t url_len)
+{
+    if (base_url == NULL || base_url[0] == '\0' || api_path == NULL ||
+        api_path[0] != '/' || url == NULL || url_len == 0) {
+        return false;
+    }
+
+    int written = snprintf(url, url_len, "%s%s", base_url, api_path);
+    return written > 0 && (size_t)written < url_len;
+}
+
+static bool komari_build_ws_path(const komari_url_parts_t *parts, char *path, size_t path_len)
+{
+    if (parts == NULL || path == NULL || path_len == 0) {
+        return false;
+    }
+
+    int written = 0;
+    if (parts->path[0] != '\0') {
+        written = snprintf(path, path_len, "%s/api/clients", parts->path);
+    } else {
+        written = snprintf(path, path_len, "/api/clients");
+    }
+    return written > 0 && (size_t)written < path_len;
+}
+
+static bool komari_parse_public_response(const char *response, komari_info_t *info)
+{
+    if (response == NULL || info == NULL) {
+        return false;
+    }
+
+    cJSON *root = cJSON_Parse(response);
+    if (root == NULL) {
+        return false;
+    }
+
+    cJSON *data = cJSON_GetObjectItemCaseSensitive(root, "data");
+    if (!cJSON_IsObject(data)) {
+        data = root;
+    }
+    if (!cJSON_IsObject(data)) {
+        cJSON_Delete(root);
+        return false;
+    }
+
+    komari_copy_text(json_first_string(data, root, "sitename", "site_name", "name"),
+                     info->sitename, sizeof(info->sitename));
+    komari_copy_text(json_first_string(data, root, "description", "desc", NULL),
+                     info->description, sizeof(info->description));
+    komari_copy_text(json_first_string(data, root, "theme", NULL, NULL),
+                     info->theme, sizeof(info->theme));
+    komari_copy_text(json_first_string(data, root, "version", "komari_version", NULL),
+                     info->version, sizeof(info->version));
+    (void)komari_json_bool(data, "private_site", &info->private_site);
+    (void)komari_json_bool(data, "record_enabled", &info->record_enabled);
+
+    info->valid = true;
+    info->public_valid = true;
+    time(&info->updated_at);
+    cJSON_Delete(root);
+    return true;
+}
+
+static bool komari_parse_nodes_response(const char *response, komari_info_t *info)
+{
+    if (response == NULL || info == NULL) {
+        return false;
+    }
+
+    cJSON *root = cJSON_Parse(response);
+    if (root == NULL) {
+        return false;
+    }
+
+    cJSON *data = cJSON_GetObjectItemCaseSensitive(root, "data");
+    if (!cJSON_IsArray(data)) {
+        data = root;
+    }
+    if (!cJSON_IsArray(data)) {
+        cJSON_Delete(root);
+        return false;
+    }
+
+    info->node_count = cJSON_GetArraySize(data);
+    info->nodes_valid = true;
+    cJSON_Delete(root);
+    return true;
+}
+
+static const char *komari_json_skip_ws(const char *text)
+{
+    while (text != NULL && *text != '\0' && isspace((unsigned char)*text)) {
+        ++text;
+    }
+    return text;
+}
+
+static const char *komari_json_value_after_key(const char *key_pos)
+{
+    if (key_pos == NULL) {
+        return NULL;
+    }
+
+    const char *colon = strchr(key_pos, ':');
+    if (colon == NULL) {
+        return NULL;
+    }
+    return komari_json_skip_ws(colon + 1);
+}
+
+static bool komari_json_count_array_items(const char *array_start,
+                                          int *count,
+                                          const char **array_end)
+{
+    if (array_start == NULL || count == NULL || *array_start != '[') {
+        return false;
+    }
+
+    int depth = 0;
+    int item_count = 0;
+    bool in_string = false;
+    bool escaped = false;
+    bool item_seen = false;
+
+    for (const char *p = array_start; *p != '\0'; ++p) {
+        char ch = *p;
+        if (in_string) {
+            if (escaped) {
+                escaped = false;
+            } else if (ch == '\\') {
+                escaped = true;
+            } else if (ch == '"') {
+                in_string = false;
+            }
+            continue;
+        }
+
+        if (ch == '"') {
+            in_string = true;
+            if (depth == 1) {
+                item_seen = true;
+            }
+            continue;
+        }
+
+        if (ch == '[' || ch == '{') {
+            if (depth == 1) {
+                item_seen = true;
+            }
+            ++depth;
+            continue;
+        }
+
+        if (ch == ']' || ch == '}') {
+            if (ch == ']' && depth == 1) {
+                if (item_seen) {
+                    ++item_count;
+                }
+                *count = item_count;
+                if (array_end != NULL) {
+                    *array_end = p + 1;
+                }
+                return true;
+            }
+            if (depth <= 1) {
+                return false;
+            }
+            --depth;
+            continue;
+        }
+
+        if (depth == 1) {
+            if (ch == ',') {
+                if (!item_seen) {
+                    return false;
+                }
+                ++item_count;
+                item_seen = false;
+            } else if (!isspace((unsigned char)ch)) {
+                item_seen = true;
+            }
+        }
+    }
+
+    return false;
+}
+
+static bool komari_json_count_object_members(const char *object_start, int *count)
+{
+    if (object_start == NULL || count == NULL || *object_start != '{') {
+        return false;
+    }
+
+    int depth = 0;
+    int member_count = 0;
+    bool in_string = false;
+    bool escaped = false;
+    bool member_seen = false;
+
+    for (const char *p = object_start; *p != '\0'; ++p) {
+        char ch = *p;
+        if (in_string) {
+            if (escaped) {
+                escaped = false;
+            } else if (ch == '\\') {
+                escaped = true;
+            } else if (ch == '"') {
+                in_string = false;
+            }
+            continue;
+        }
+
+        if (ch == '"') {
+            in_string = true;
+            if (depth == 1) {
+                member_seen = true;
+            }
+            continue;
+        }
+
+        if (ch == '{' || ch == '[') {
+            if (depth == 1) {
+                member_seen = true;
+            }
+            ++depth;
+            continue;
+        }
+
+        if (ch == '}' || ch == ']') {
+            if (ch == '}' && depth == 1) {
+                if (member_seen) {
+                    ++member_count;
+                }
+                *count = member_count;
+                return true;
+            }
+            if (depth <= 1) {
+                return false;
+            }
+            --depth;
+            continue;
+        }
+
+        if (depth == 1) {
+            if (ch == ',') {
+                if (!member_seen) {
+                    return false;
+                }
+                ++member_count;
+                member_seen = false;
+            } else if (!isspace((unsigned char)ch)) {
+                member_seen = true;
+            }
+        }
+    }
+
+    return false;
+}
+
+static bool komari_parse_clients_response(const char *response, komari_info_t *info)
+{
+    if (response == NULL || info == NULL) {
+        return false;
+    }
+
+    const char *online_key = strstr(response, "\"online\"");
+    const char *online_value = komari_json_value_after_key(online_key);
+    if (online_value == NULL || *online_value != 0x5B) {
+        return false;
+    }
+
+    int online_count = 0;
+    const char *online_end = NULL;
+    if (!komari_json_count_array_items(online_value, &online_count, &online_end)) {
+        return false;
+    }
+
+    info->online_count = online_count;
+    info->online_valid = true;
+
+    if (info->node_count < 0 && online_end != NULL) {
+        const char *nodes_key = strstr(online_end, "\"data\"");
+        const char *nodes_value = komari_json_value_after_key(nodes_key);
+        int node_count = 0;
+        if (nodes_value != NULL && *nodes_value == 0x7B &&
+            komari_json_count_object_members(nodes_value, &node_count)) {
+            info->node_count = node_count;
+            info->nodes_valid = true;
+        }
+    }
+
+    return true;
+}
+
+static esp_err_t komari_fetch_public(const char *base_url, char *response,
+                                     size_t response_len, komari_info_t *info)
+{
+    char url[KOMARI_URL_BUFFER_SIZE] = {0};
+    ESP_RETURN_ON_FALSE(komari_build_api_url(base_url, "/api/public", url, sizeof(url)),
+                        ESP_ERR_INVALID_SIZE, TAG, "build Komari public URL failed");
+
+    esp_err_t ret = http_get_text_once(url, response, response_len, "komari-public");
+    if (ret != ESP_OK) {
+        return ret;
+    }
+    if (!komari_parse_public_response(response, info)) {
+        ESP_LOGW(TAG, "Komari public parse failed: %.120s", response);
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+    return ESP_OK;
+}
+
+static esp_err_t komari_fetch_nodes(const char *base_url, char *response,
+                                    size_t response_len, komari_info_t *info)
+{
+    char url[KOMARI_URL_BUFFER_SIZE] = {0};
+    ESP_RETURN_ON_FALSE(komari_build_api_url(base_url, "/api/nodes", url, sizeof(url)),
+                        ESP_ERR_INVALID_SIZE, TAG, "build Komari nodes URL failed");
+
+    esp_err_t ret = http_get_text_once(url, response, response_len, "komari-nodes");
+    if (ret != ESP_OK) {
+        return ret;
+    }
+    if (!komari_parse_nodes_response(response, info)) {
+        ESP_LOGW(TAG, "Komari nodes parse failed: %.120s", response);
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+    return ESP_OK;
+}
+
+typedef struct {
+    char *data;
+    size_t len;
+    size_t pos;
+} komari_ws_prefetch_t;
+
+static esp_err_t komari_transport_write_all(esp_transport_handle_t transport,
+                                            const uint8_t *data, size_t len,
+                                            int timeout_ms)
+{
+    size_t total = 0;
+    while (total < len) {
+        int written = esp_transport_write(transport, (const char *)data + total,
+                                          (int)(len - total), timeout_ms);
+        if (written <= 0) {
+            ESP_LOGW(TAG, "Komari transport write failed: written=%d errno=%d", written, errno);
+            return ESP_FAIL;
+        }
+        total += (size_t)written;
+    }
+    return ESP_OK;
+}
+
+static esp_err_t komari_ws_read_exact(esp_transport_handle_t transport,
+                                      uint8_t *buffer, size_t len,
+                                      komari_ws_prefetch_t *prefetch,
+                                      int timeout_ms)
+{
+    size_t total = 0;
+    while (total < len) {
+        if (prefetch != NULL && prefetch->pos < prefetch->len) {
+            size_t available = prefetch->len - prefetch->pos;
+            size_t copy_len = len - total;
+            if (copy_len > available) {
+                copy_len = available;
+            }
+            memmove(buffer + total, prefetch->data + prefetch->pos, copy_len);
+            prefetch->pos += copy_len;
+            total += copy_len;
+            continue;
+        }
+
+        int read_len = esp_transport_read(transport, (char *)buffer + total,
+                                          (int)(len - total), timeout_ms);
+        if (read_len > 0) {
+            total += (size_t)read_len;
+            continue;
+        }
+        ESP_LOGW(TAG, "Komari transport read failed: read=%d errno=%d", read_len, errno);
+        return read_len == 0 ? ESP_ERR_TIMEOUT : ESP_FAIL;
+    }
+    return ESP_OK;
+}
+
+static void komari_ws_unmask(uint8_t *data, size_t len, const uint8_t mask[4])
+{
+    for (size_t i = 0; i < len; ++i) {
+        data[i] ^= mask[i % 4];
+    }
+}
+
+static bool komari_ws_build_host_header(const komari_url_parts_t *parts,
+                                        char *host, size_t host_len)
+{
+    if (parts == NULL || host == NULL || host_len == 0) {
+        return false;
+    }
+
+    int default_port = parts->https ? 443 : 80;
+    int written = 0;
+    if (parts->port == default_port) {
+        written = snprintf(host, host_len, "%s", parts->host);
+    } else {
+        written = snprintf(host, host_len, "%s:%d", parts->host, parts->port);
+    }
+    return written > 0 && (size_t)written < host_len;
+}
+
+static bool komari_ws_build_origin_header(const komari_url_parts_t *parts,
+                                          char *origin, size_t origin_len)
+{
+    if (parts == NULL || origin == NULL || origin_len == 0) {
+        return false;
+    }
+
+    char host_header[KOMARI_HOST_LEN + 8] = {0};
+    if (!komari_ws_build_host_header(parts, host_header, sizeof(host_header))) {
+        return false;
+    }
+
+    int written = snprintf(origin, origin_len, "%s://%s",
+                           parts->https ? "https" : "http", host_header);
+    return written > 0 && (size_t)written < origin_len;
+}
+
+static bool komari_ws_status_is_101(const char *response)
+{
+    int status = 0;
+    return response != NULL &&
+           sscanf(response, "HTTP/%*[^ ] %d", &status) == 1 &&
+           status == 101;
+}
+
+static esp_err_t komari_ws_make_key(char *key, size_t key_len)
+{
+    ESP_RETURN_ON_FALSE(key != NULL && key_len > 0, ESP_ERR_INVALID_ARG,
+                        TAG, "invalid Komari WS key buffer");
+
+    uint8_t random_key[16];
+    esp_fill_random(random_key, sizeof(random_key));
+
+    size_t written = 0;
+    int ret = esp_crypto_base64_encode((unsigned char *)key, key_len, &written,
+                                       random_key, sizeof(random_key));
+    if (ret != 0 || written >= key_len) {
+        ESP_LOGW(TAG, "Komari WS key encode failed: ret=%d written=%u",
+                 ret, (unsigned)written);
+        return ESP_FAIL;
+    }
+    key[written] = '\0';
+    return ESP_OK;
+}
+
+static esp_err_t komari_ws_read_handshake_response(esp_transport_handle_t transport,
+                                                   char *response,
+                                                   size_t response_len,
+                                                   size_t *prefetched_len)
+{
+    const char delimiter[] = "\r\n\r\n";
+    size_t total = 0;
+
+    ESP_RETURN_ON_FALSE(response != NULL && response_len > 1 && prefetched_len != NULL,
+                        ESP_ERR_INVALID_ARG, TAG, "invalid Komari WS handshake buffer");
+
+    *prefetched_len = 0;
+    response[0] = '\0';
+    while (total < response_len - 1) {
+        int read_len = esp_transport_read(transport, response + total,
+                                          (int)(response_len - 1 - total), 5000);
+        if (read_len <= 0) {
+            ESP_LOGW(TAG, "Komari WS handshake read failed: read=%d errno=%d", read_len, errno);
+            return read_len == 0 ? ESP_ERR_TIMEOUT : ESP_FAIL;
+        }
+
+        total += (size_t)read_len;
+        response[total] = '\0';
+
+        char *header_end = strstr(response, delimiter);
+        if (header_end == NULL) {
+            continue;
+        }
+
+        size_t header_len = (size_t)(header_end - response) + strlen(delimiter);
+        char saved = response[header_len];
+        response[header_len] = '\0';
+        bool status_ok = komari_ws_status_is_101(response);
+        if (!status_ok) {
+            ESP_LOGW(TAG, "Komari WS upgrade failed: %.120s", response);
+            return ESP_ERR_INVALID_RESPONSE;
+        }
+        response[header_len] = saved;
+
+        size_t extra_len = total - header_len;
+        if (extra_len > 0) {
+            memmove(response, response + header_len, extra_len);
+        }
+        response[extra_len] = '\0';
+        *prefetched_len = extra_len;
+        return ESP_OK;
+    }
+
+    ESP_LOGW(TAG, "Komari WS handshake header exceeded buffer: len=%u", (unsigned)total);
+    return ESP_ERR_INVALID_SIZE;
+}
+
+static esp_err_t komari_ws_send_control_frame(esp_transport_handle_t transport,
+                                              uint8_t opcode,
+                                              const uint8_t *payload,
+                                              size_t payload_len)
+{
+    ESP_RETURN_ON_FALSE(payload_len <= 125, ESP_ERR_INVALID_SIZE,
+                        TAG, "Komari WS control payload too large");
+
+    uint8_t frame[2 + 4 + 125];
+    uint8_t mask[4];
+    esp_fill_random(mask, sizeof(mask));
+
+    frame[0] = 0x80 | (opcode & 0x0F);
+    frame[1] = 0x80 | (uint8_t)payload_len;
+    memcpy(frame + 2, mask, sizeof(mask));
+    for (size_t i = 0; i < payload_len; ++i) {
+        uint8_t byte = payload != NULL ? payload[i] : 0;
+        frame[2 + sizeof(mask) + i] = byte ^ mask[i % sizeof(mask)];
+    }
+
+    return komari_transport_write_all(transport, frame, 2 + sizeof(mask) + payload_len, 5000);
+}
+
+static esp_err_t komari_ws_send_text_get(esp_transport_handle_t transport)
+{
+    const char payload[] = "get";
+    const size_t payload_len = sizeof(payload) - 1;
+    uint8_t frame[2 + 4 + sizeof(payload) - 1];
+    uint8_t mask[4];
+
+    esp_fill_random(mask, sizeof(mask));
+    frame[0] = 0x81;
+    frame[1] = 0x80 | (uint8_t)payload_len;
+    memcpy(frame + 2, mask, sizeof(mask));
+    for (size_t i = 0; i < payload_len; ++i) {
+        frame[2 + sizeof(mask) + i] = ((uint8_t)payload[i]) ^ mask[i % sizeof(mask)];
+    }
+
+    return komari_transport_write_all(transport, frame, sizeof(frame), 5000);
+}
+
+static esp_err_t komari_ws_read_frame_header(esp_transport_handle_t transport,
+                                             komari_ws_prefetch_t *prefetch,
+                                             bool *fin,
+                                             uint8_t *opcode,
+                                             uint64_t *payload_len,
+                                             bool *masked,
+                                             uint8_t mask[4])
+{
+    uint8_t header[2] = {0};
+    ESP_RETURN_ON_ERROR(komari_ws_read_exact(transport, header, sizeof(header),
+                                             prefetch, 5000),
+                        TAG, "read Komari WS frame header failed");
+
+    *fin = (header[0] & 0x80) != 0;
+    *opcode = header[0] & 0x0F;
+    *masked = (header[1] & 0x80) != 0;
+    *payload_len = header[1] & 0x7F;
+
+    if (*payload_len == 126) {
+        uint8_t ext[2] = {0};
+        ESP_RETURN_ON_ERROR(komari_ws_read_exact(transport, ext, sizeof(ext),
+                                                 prefetch, 5000),
+                            TAG, "read Komari WS 16-bit length failed");
+        *payload_len = ((uint64_t)ext[0] << 8) | ext[1];
+    } else if (*payload_len == 127) {
+        uint8_t ext[8] = {0};
+        ESP_RETURN_ON_ERROR(komari_ws_read_exact(transport, ext, sizeof(ext),
+                                                 prefetch, 5000),
+                            TAG, "read Komari WS 64-bit length failed");
+        *payload_len = 0;
+        for (size_t i = 0; i < sizeof(ext); ++i) {
+            *payload_len = (*payload_len << 8) | ext[i];
+        }
+    }
+
+    if (*masked) {
+        ESP_RETURN_ON_ERROR(komari_ws_read_exact(transport, mask, 4, prefetch, 5000),
+                            TAG, "read Komari WS mask failed");
+    } else {
+        memset(mask, 0, 4);
+    }
+    return ESP_OK;
+}
+
+static esp_err_t komari_ws_read_text_frame(esp_transport_handle_t transport,
+                                           char *response,
+                                           size_t response_len,
+                                           size_t prefetched_len)
+{
+    ESP_RETURN_ON_FALSE(response != NULL && response_len > 1, ESP_ERR_INVALID_ARG,
+                        TAG, "invalid Komari WS response buffer");
+
+    komari_ws_prefetch_t prefetch = {
+        .data = response,
+        .len = prefetched_len,
+        .pos = 0,
+    };
+
+    size_t total = 0;
+    for (int frame_index = 0; frame_index < 8; ++frame_index) {
+        bool fin = false;
+        bool masked = false;
+        uint8_t opcode = 0;
+        uint8_t mask[4] = {0};
+        uint64_t payload_len = 0;
+
+        ESP_RETURN_ON_ERROR(komari_ws_read_frame_header(transport, &prefetch,
+                                                        &fin, &opcode,
+                                                        &payload_len, &masked, mask),
+                            TAG, "read Komari WS frame metadata failed");
+
+        if ((opcode & 0x08) != 0) {
+            if (payload_len > 125) {
+                ESP_LOGW(TAG, "Komari WS invalid control length: %llu",
+                         (unsigned long long)payload_len);
+                return ESP_ERR_INVALID_RESPONSE;
+            }
+
+            uint8_t control_payload[125] = {0};
+            if (payload_len > 0) {
+                ESP_RETURN_ON_ERROR(komari_ws_read_exact(transport, control_payload,
+                                                         (size_t)payload_len,
+                                                         &prefetch, 5000),
+                                    TAG, "read Komari WS control payload failed");
+                if (masked) {
+                    komari_ws_unmask(control_payload, (size_t)payload_len, mask);
+                }
+            }
+
+            if (opcode == 0x8) {
+                ESP_LOGW(TAG, "Komari WS closed by server");
+                return ESP_FAIL;
+            }
+            if (opcode == 0x9) {
+                ESP_RETURN_ON_ERROR(komari_ws_send_control_frame(transport, 0xA,
+                                                                 control_payload,
+                                                                 (size_t)payload_len),
+                                    TAG, "send Komari WS pong failed");
+            }
+            continue;
+        }
+
+        if (opcode != 0x1 && opcode != 0x0) {
+            ESP_LOGW(TAG, "Komari WS unsupported opcode: %u", opcode);
+            return ESP_ERR_INVALID_RESPONSE;
+        }
+
+        if (payload_len > (uint64_t)(response_len - 1 - total)) {
+            ESP_LOGW(TAG, "Komari WS payload too large: %llu",
+                     (unsigned long long)payload_len);
+            return ESP_ERR_INVALID_SIZE;
+        }
+
+        if (payload_len > 0) {
+            ESP_RETURN_ON_ERROR(komari_ws_read_exact(transport,
+                                                     (uint8_t *)response + total,
+                                                     (size_t)payload_len,
+                                                     &prefetch, 5000),
+                                TAG, "read Komari WS payload failed");
+            if (masked) {
+                komari_ws_unmask((uint8_t *)response + total,
+                                 (size_t)payload_len, mask);
+            }
+            total += (size_t)payload_len;
+            response[total] = '\0';
+        }
+
+        if (fin) {
+            return total > 0 ? ESP_OK : ESP_ERR_INVALID_RESPONSE;
+        }
+    }
+
+    ESP_LOGW(TAG, "Komari WS text frame did not finish");
+    return ESP_ERR_TIMEOUT;
+}
+
+static esp_err_t komari_fetch_online_ws(const char *base_url, char *response,
+                                        size_t response_len, komari_info_t *info)
+{
+    ESP_RETURN_ON_FALSE(response != NULL && response_len > 1, ESP_ERR_INVALID_ARG,
+                        TAG, "invalid Komari WS buffer");
+
+    komari_url_parts_t parts = {0};
+    ESP_RETURN_ON_FALSE(komari_parse_base_url(base_url, &parts), ESP_ERR_INVALID_ARG,
+                        TAG, "invalid Komari base URL");
+
+    char ws_path[KOMARI_PATH_LEN + 32] = {0};
+    ESP_RETURN_ON_FALSE(komari_build_ws_path(&parts, ws_path, sizeof(ws_path)),
+                        ESP_ERR_INVALID_SIZE, TAG, "build Komari WS path failed");
+
+    esp_transport_handle_t transport = parts.https ? esp_transport_ssl_init() : esp_transport_tcp_init();
+    ESP_RETURN_ON_FALSE(transport != NULL, ESP_ERR_NO_MEM, TAG, "create Komari transport failed");
+    if (parts.https) {
+        esp_transport_ssl_crt_bundle_attach(transport, esp_crt_bundle_attach);
+    }
+
+    esp_err_t ret = ESP_OK;
+    if (esp_transport_connect(transport, parts.host, parts.port, 8000) != 0) {
+        ESP_LOGW(TAG, "Komari WS transport connect failed: host=%s port=%d path=%s errno=%d",
+                 parts.host, parts.port, ws_path, errno);
+        ret = ESP_FAIL;
+        goto cleanup;
+    }
+
+    char host_header[KOMARI_HOST_LEN + 8] = {0};
+    ESP_GOTO_ON_FALSE(komari_ws_build_host_header(&parts, host_header, sizeof(host_header)),
+                      ESP_ERR_INVALID_SIZE, cleanup, TAG, "build Komari WS Host header failed");
+
+    char origin_header[KOMARI_HOST_LEN + 16] = {0};
+    ESP_GOTO_ON_FALSE(komari_ws_build_origin_header(&parts, origin_header, sizeof(origin_header)),
+                      ESP_ERR_INVALID_SIZE, cleanup, TAG, "build Komari WS Origin header failed");
+
+    char ws_key[32] = {0};
+    ESP_GOTO_ON_ERROR(komari_ws_make_key(ws_key, sizeof(ws_key)),
+                      cleanup, TAG, "make Komari WS key failed");
+
+    char request[512] = {0};
+    int request_len = snprintf(request, sizeof(request),
+                               "GET %s HTTP/1.1\r\n"
+                               "Host: %s\r\n"
+                               "Upgrade: websocket\r\n"
+                               "Connection: Upgrade\r\n"
+                               "Sec-WebSocket-Key: %s\r\n"
+                               "Sec-WebSocket-Version: 13\r\n"
+                               "Origin: %s\r\n"
+                               "User-Agent: esp32-cyd-clock\r\n"
+                               "\r\n",
+                               ws_path, host_header, ws_key, origin_header);
+    ESP_GOTO_ON_FALSE(request_len > 0 && (size_t)request_len < sizeof(request),
+                      ESP_ERR_INVALID_SIZE, cleanup, TAG, "build Komari WS request failed");
+
+    ESP_GOTO_ON_ERROR(komari_transport_write_all(transport,
+                                                 (const uint8_t *)request,
+                                                 (size_t)request_len, 5000),
+                      cleanup, TAG, "send Komari WS handshake failed");
+
+    size_t prefetched_len = 0;
+    ESP_GOTO_ON_ERROR(komari_ws_read_handshake_response(transport, response,
+                                                        response_len,
+                                                        &prefetched_len),
+                      cleanup, TAG, "read Komari WS handshake failed");
+
+    ESP_GOTO_ON_ERROR(komari_ws_send_text_get(transport),
+                      cleanup, TAG, "send Komari WS get failed");
+
+    ret = komari_ws_read_text_frame(transport, response, response_len, prefetched_len);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Komari WS read text failed: %s", esp_err_to_name(ret));
+        goto cleanup;
+    }
+
+    if (!komari_parse_clients_response(response, info)) {
+        ESP_LOGW(TAG, "Komari WS parse failed: %.120s", response);
+        ret = ESP_ERR_INVALID_RESPONSE;
+        goto cleanup;
+    }
+
+cleanup:
+    (void)esp_transport_close(transport);
+    esp_transport_destroy(transport);
+    return ret;
+}
+
+static esp_err_t komari_fetch_once(void)
+{
+    char base_url[KOMARI_URL_LEN] = {0};
+    if (!komari_get_base_url(base_url, sizeof(base_url))) {
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    char *response = heap_caps_calloc(1, KOMARI_WS_BUFFER_SIZE, MALLOC_CAP_8BIT);
+    ESP_RETURN_ON_FALSE(response != NULL, ESP_ERR_NO_MEM, TAG, "alloc Komari response failed");
+
+    komari_info_t info = {0};
+    info.configured = true;
+    info.online_count = -1;
+    info.node_count = -1;
+    strlcpy(info.base_url, base_url, sizeof(info.base_url));
+    komari_set_default_text(&info);
+
+    esp_err_t ret = komari_fetch_public(base_url, response, KOMARI_HTTP_BUFFER_SIZE, &info);
+    if (ret != ESP_OK) {
+        free(response);
+        return ret;
+    }
+
+    memset(response, 0, KOMARI_WS_BUFFER_SIZE);
+    esp_err_t nodes_ret = komari_fetch_nodes(base_url, response, KOMARI_HTTP_BUFFER_SIZE, &info);
+    if (nodes_ret != ESP_OK) {
+        ESP_LOGW(TAG, "Komari nodes update failed: %s", esp_err_to_name(nodes_ret));
+    }
+
+    memset(response, 0, KOMARI_WS_BUFFER_SIZE);
+    esp_err_t online_ret = komari_fetch_online_ws(base_url, response, KOMARI_WS_BUFFER_SIZE, &info);
+    if (online_ret != ESP_OK) {
+        ESP_LOGW(TAG, "Komari online update failed: %s", esp_err_to_name(online_ret));
+    }
+    free(response);
+
+    if (info.online_valid && info.node_count >= 0 && info.online_count > info.node_count) {
+        info.node_count = info.online_count;
+    }
+    komari_set_snapshot(&info);
+    ESP_LOGI(TAG, "komari updated: online=%d total=%d site=%s public=%d nodes=%d online_valid=%d",
+             info.online_count, info.node_count, info.sitename,
+             info.public_valid, info.nodes_valid, info.online_valid);
+    return ESP_OK;
+}
+
+static void komari_task(void *arg)
+{
+    (void)arg;
+
+    for (;;) {
+        if (s_wifi_event_group == NULL) {
+            vTaskDelay(pdMS_TO_TICKS(5000));
+            continue;
+        }
+
+        EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group, WIFI_CONNECTED_BIT,
+                                               pdFALSE, pdTRUE, pdMS_TO_TICKS(30000));
+        if ((bits & WIFI_CONNECTED_BIT) == 0) {
+            vTaskDelay(pdMS_TO_TICKS(5000));
+            continue;
+        }
+
+        if (!komari_configured()) {
+            vTaskDelay(pdMS_TO_TICKS(KOMARI_REFRESH_MS));
+            continue;
+        }
+
+        esp_err_t ret = ESP_ERR_TIMEOUT;
+        if (network_fetch_lock_take("komari", pdMS_TO_TICKS(120000))) {
+            ret = komari_fetch_once();
+            network_fetch_lock_give();
+        }
+        if (ret != ESP_OK && ret != ESP_ERR_NOT_FOUND) {
+            ESP_LOGW(TAG, "komari update failed: %s", esp_err_to_name(ret));
+        }
+        log_runtime_health("komari");
+        vTaskDelay(pdMS_TO_TICKS(KOMARI_REFRESH_MS));
+    }
+}
+
 static esp_err_t weather_fetch_url(const char *url, weather_info_t *out, const char *label)
 {
     ESP_RETURN_ON_FALSE(out != NULL, ESP_ERR_INVALID_ARG, TAG, "invalid weather output");
 
-    char response[WEATHER_HTTP_BUFFER_SIZE] = {0};
+    char response[WEATHER_TEXT_HTTP_BUFFER_SIZE] = {0};
     esp_err_t ret = http_get_text(url, response, sizeof(response), label);
     if (ret != ESP_OK) {
         return ret;
     }
 
     if (!weather_parse_response(response, out)) {
-        ESP_LOGW(TAG, "%s parse failed: %s", label != NULL ? label : "weather", response);
+        ESP_LOGW(TAG, "%s parse failed", label != NULL ? label : "weather");
         return ESP_ERR_INVALID_RESPONSE;
     }
     return ESP_OK;
 }
 
-static esp_err_t weather_fetch_open_meteo_city(const weather_geo_info_t *geo, weather_info_t *out)
+static void weather_apply_geo_city(weather_info_t *parsed, const weather_geo_info_t *geo,
+                                   const char *city)
 {
-    ESP_RETURN_ON_FALSE(geo != NULL && out != NULL, ESP_ERR_INVALID_ARG,
-                        TAG, "invalid Open-Meteo request");
+    if (parsed == NULL || geo == NULL) {
+        return;
+    }
+    if (geo->city_display[0] != '\0') {
+        strlcpy(parsed->city, geo->city_display, sizeof(parsed->city));
+    } else if (city != NULL && city[0] != '\0') {
+        sanitize_weather_city(city, parsed->city, sizeof(parsed->city));
+    }
+}
+
+static esp_err_t weather_fetch_open_meteo_location(const weather_geo_info_t *geo,
+                                                   double *latitude, double *longitude,
+                                                   char *city, size_t city_len)
+{
+    ESP_RETURN_ON_FALSE(geo != NULL && latitude != NULL && longitude != NULL,
+                        ESP_ERR_INVALID_ARG, TAG, "invalid Open-Meteo location request");
 
     const char *city_query = geo->city_native[0] != '\0' ? geo->city_native : geo->city_query;
     if (city_query == NULL || city_query[0] == '\0') {
@@ -2010,29 +3724,43 @@ static esp_err_t weather_fetch_open_meteo_city(const weather_geo_info_t *geo, we
         return ESP_ERR_INVALID_SIZE;
     }
 
-    char response[WEATHER_HTTP_BUFFER_SIZE] = {0};
-    esp_err_t ret = http_get_text(url, response, sizeof(response), "meteo-geo");
+    char *response = heap_caps_calloc(1, WEATHER_HTTP_BUFFER_SIZE, MALLOC_CAP_8BIT);
+    ESP_RETURN_ON_FALSE(response != NULL, ESP_ERR_NO_MEM, TAG, "alloc Open-Meteo geocode response failed");
+
+    esp_err_t ret = http_get_text(url, response, WEATHER_HTTP_BUFFER_SIZE, "meteo-geo");
     if (ret != ESP_OK) {
+        free(response);
         return ret;
     }
 
-    double latitude = 0.0;
-    double longitude = 0.0;
-    char city[WEATHER_CITY_LEN] = {0};
-    if (!weather_parse_open_meteo_geocode_response(response, geo, &latitude, &longitude,
-                                                   city, sizeof(city))) {
+    if (!weather_parse_open_meteo_geocode_response(response, geo, latitude, longitude,
+                                                   city, city_len)) {
         ESP_LOGW(TAG, "Open-Meteo geocode parse failed: city=%s response=%.120s",
                  city_query, response);
+        free(response);
         return ESP_ERR_INVALID_RESPONSE;
     }
 
+    free(response);
+    return ESP_OK;
+}
+
+static esp_err_t weather_fetch_open_meteo_forecast(double latitude, double longitude,
+                                                   weather_info_t *out)
+{
+    ESP_RETURN_ON_FALSE(out != NULL, ESP_ERR_INVALID_ARG, TAG, "invalid Open-Meteo output");
+
+    char url[WEATHER_URL_BUFFER_SIZE] = {0};
     if (!weather_build_open_meteo_forecast_url(latitude, longitude, url, sizeof(url))) {
         return ESP_ERR_INVALID_SIZE;
     }
 
-    memset(response, 0, sizeof(response));
-    ret = http_get_text(url, response, sizeof(response), "meteo-weather");
+    char *response = heap_caps_calloc(1, WEATHER_HTTP_BUFFER_SIZE, MALLOC_CAP_8BIT);
+    ESP_RETURN_ON_FALSE(response != NULL, ESP_ERR_NO_MEM, TAG, "alloc Open-Meteo forecast response failed");
+
+    esp_err_t ret = http_get_text(url, response, WEATHER_HTTP_BUFFER_SIZE, "meteo-weather");
     if (ret != ESP_OK) {
+        free(response);
         return ret;
     }
 
@@ -2040,17 +3768,75 @@ static esp_err_t weather_fetch_open_meteo_city(const weather_geo_info_t *geo, we
     parsed.weather_code = -1;
     if (!weather_parse_open_meteo_forecast_response(response, &parsed)) {
         ESP_LOGW(TAG, "Open-Meteo weather parse failed: %.120s", response);
+        free(response);
         return ESP_ERR_INVALID_RESPONSE;
     }
+    free(response);
 
-    if (geo->city_display[0] != '\0') {
-        strlcpy(parsed.city, geo->city_display, sizeof(parsed.city));
-    } else if (city[0] != '\0') {
-        sanitize_weather_city(city, parsed.city, sizeof(parsed.city));
+    *out = parsed;
+    return ESP_OK;
+}
+
+static esp_err_t weather_fetch_open_meteo_hourly(double latitude, double longitude,
+                                                 weather_info_t *out)
+{
+    ESP_RETURN_ON_FALSE(out != NULL, ESP_ERR_INVALID_ARG, TAG, "invalid Open-Meteo hourly output");
+
+    char url[WEATHER_URL_BUFFER_SIZE] = {0};
+    if (!weather_build_open_meteo_hourly_url(latitude, longitude, url, sizeof(url))) {
+        return ESP_ERR_INVALID_SIZE;
     }
 
-    ESP_LOGI(TAG, "Open-Meteo selected: city=%s lat=%.4f lon=%.4f days=%d",
-             parsed.city[0] != '\0' ? parsed.city : city_query,
+    char *response = heap_caps_calloc(1, WEATHER_HOURLY_HTTP_BUFFER_SIZE, MALLOC_CAP_8BIT);
+    ESP_RETURN_ON_FALSE(response != NULL, ESP_ERR_NO_MEM, TAG, "alloc Open-Meteo hourly response failed");
+
+    esp_err_t ret = http_get_text(url, response, WEATHER_HOURLY_HTTP_BUFFER_SIZE, "meteo-hourly");
+    if (ret != ESP_OK) {
+        free(response);
+        return ret;
+    }
+
+    if (!weather_parse_open_meteo_hourly_response(response, out)) {
+        ESP_LOGW(TAG, "Open-Meteo hourly parse failed: %.120s", response);
+        free(response);
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+    free(response);
+
+    ESP_LOGI(TAG, "Open-Meteo hourly selected: lat=%.4f lon=%.4f hours=%d",
+             latitude, longitude, out->hourly_count);
+    return ESP_OK;
+}
+
+static esp_err_t weather_fetch_7timer_forecast(double latitude, double longitude,
+                                               weather_info_t *out)
+{
+    ESP_RETURN_ON_FALSE(out != NULL, ESP_ERR_INVALID_ARG, TAG, "invalid 7Timer output");
+
+    char url[WEATHER_URL_BUFFER_SIZE] = {0};
+    if (!weather_build_7timer_forecast_url(latitude, longitude, url, sizeof(url))) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    char *response = heap_caps_calloc(1, WEATHER_FORECAST_HTTP_BUFFER_SIZE, MALLOC_CAP_8BIT);
+    ESP_RETURN_ON_FALSE(response != NULL, ESP_ERR_NO_MEM, TAG, "alloc 7Timer response failed");
+
+    esp_err_t ret = http_get_text(url, response, WEATHER_FORECAST_HTTP_BUFFER_SIZE, "7timer-weather");
+    if (ret != ESP_OK) {
+        free(response);
+        return ret;
+    }
+
+    weather_info_t parsed = {0};
+    parsed.weather_code = -1;
+    if (!weather_parse_7timer_forecast_response(response, &parsed)) {
+        ESP_LOGW(TAG, "7Timer forecast parse failed: %.120s", response);
+        free(response);
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+    free(response);
+
+    ESP_LOGI(TAG, "7Timer forecast selected: lat=%.4f lon=%.4f days=%d",
              latitude, longitude, parsed.forecast_count);
     *out = parsed;
     return ESP_OK;
@@ -2087,18 +3873,49 @@ static esp_err_t weather_fetch_preferred_cn(weather_info_t *out)
              geo.country_code[0] != '\0' ? geo.country_code : "-",
              geo.city_query, geo.city_display);
 
-    weather_info_t parsed = {0};
-    ret = weather_fetch_open_meteo_city(&geo, &parsed);
+    double latitude = 0.0;
+    double longitude = 0.0;
+    char open_meteo_city[WEATHER_CITY_LEN] = {0};
+    weather_info_t backup_forecast = {0};
+    esp_err_t forecast_ret = ESP_ERR_NOT_SUPPORTED;
+    ret = weather_fetch_open_meteo_location(&geo, &latitude, &longitude,
+                                            open_meteo_city, sizeof(open_meteo_city));
     if (ret == ESP_OK) {
-        *out = parsed;
-        return ESP_OK;
+        weather_info_t parsed = {0};
+        ret = weather_fetch_open_meteo_forecast(latitude, longitude, &parsed);
+        if (ret == ESP_OK) {
+            weather_apply_geo_city(&parsed, &geo, open_meteo_city);
+            esp_err_t hourly_ret = weather_fetch_open_meteo_hourly(latitude, longitude, &parsed);
+            if (hourly_ret != ESP_OK) {
+                ESP_LOGI(TAG, "Open-Meteo hourly failed: %s, keep daily forecast only",
+                         esp_err_to_name(hourly_ret));
+            }
+            ESP_LOGI(TAG, "Open-Meteo selected: city=%s lat=%.4f lon=%.4f days=%d hours=%d",
+                     parsed.city[0] != '\0' ? parsed.city : geo.city_query,
+                     latitude, longitude, parsed.forecast_count, parsed.hourly_count);
+            *out = parsed;
+            return ESP_OK;
+        }
+
+        ESP_LOGI(TAG, "Open-Meteo forecast failed: %s, fallback to 7Timer forecast",
+                 esp_err_to_name(ret));
+        forecast_ret = weather_fetch_7timer_forecast(latitude, longitude, &backup_forecast);
+        if (forecast_ret != ESP_OK) {
+            ESP_LOGI(TAG, "7Timer forecast failed: %s, fallback to wttr current weather",
+                     esp_err_to_name(forecast_ret));
+        }
+    } else {
+        ESP_LOGI(TAG, "Open-Meteo geocode failed: %s, fallback to wttr city weather",
+                 esp_err_to_name(ret));
     }
 
-    ESP_LOGI(TAG, "Open-Meteo failed: %s, fallback to wttr city weather",
-             esp_err_to_name(ret));
+    weather_info_t parsed = {0};
     ret = weather_fetch_url(weather_url, &parsed, "weather-cn");
     if (ret != ESP_OK) {
         return ret;
+    }
+    if (forecast_ret == ESP_OK) {
+        weather_copy_forecast(&parsed, &backup_forecast);
     }
     if (parsed.city[0] == '\0' && geo.city_display[0] != '\0') {
         strlcpy(parsed.city, geo.city_display, sizeof(parsed.city));
@@ -2125,9 +3942,10 @@ static esp_err_t weather_fetch_once(void)
 
     if (ret == ESP_OK) {
         weather_set_snapshot(&parsed);
-        ESP_LOGI(TAG, "weather updated[%s]: city=%s temp=%d humidity=%d condition=%s days=%d",
+        ESP_LOGI(TAG, "weather updated[%s]: city=%s temp=%d humidity=%d condition=%s days=%d hours=%d",
                  source, parsed.city[0] != '\0' ? parsed.city : "-",
-                 parsed.temp_c, parsed.humidity, parsed.condition, parsed.forecast_count);
+                 parsed.temp_c, parsed.humidity, parsed.condition,
+                 parsed.forecast_count, parsed.hourly_count);
     }
     return ret;
 #else
@@ -2153,7 +3971,15 @@ static void weather_task(void *arg)
             continue;
         }
 
-        (void)weather_fetch_once();
+        esp_err_t ret = ESP_ERR_TIMEOUT;
+        if (network_fetch_lock_take("weather", pdMS_TO_TICKS(120000))) {
+            ret = weather_fetch_once();
+            network_fetch_lock_give();
+        }
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "weather update failed: %s", esp_err_to_name(ret));
+        }
+        log_runtime_health("weather");
         vTaskDelay(refresh_ticks > 0 ? refresh_ticks : pdMS_TO_TICKS(600000));
     }
 }
@@ -2320,6 +4146,15 @@ static esp_err_t draw_card_icon(int kind, int cx, int cy, uint16_t accent, int h
         ESP_RETURN_ON_ERROR(lcd_fill_rect(cx - 4, cy - 9, 2, 5, white), TAG, "draw calendar pin failed");
         return lcd_fill_rect(cx + 3, cy - 9, 2, 5, white);
     }
+    if (kind == 3) {
+        ESP_RETURN_ON_ERROR(lcd_fill_circle(cx, cy, bg_radius, icon_bg), TAG, "draw komari icon bg failed");
+        ESP_RETURN_ON_ERROR(lcd_fill_circle(cx - 5, cy - 3, 2, accent), TAG, "draw komari node failed");
+        ESP_RETURN_ON_ERROR(lcd_fill_circle(cx + 5, cy - 3, 2, accent), TAG, "draw komari node failed");
+        ESP_RETURN_ON_ERROR(lcd_fill_circle(cx, cy + 5, 2, white), TAG, "draw komari node failed");
+        ESP_RETURN_ON_ERROR(lcd_draw_line(cx - 4, cy - 2, cx - 1, cy + 3, 1, accent),
+                            TAG, "draw komari link failed");
+        return lcd_draw_line(cx + 4, cy - 2, cx + 1, cy + 3, 1, accent);
+    }
 
     const uint16_t ring_base = mix_color(rgb565(18, 26, 55), accent, 1, 5);
     ESP_RETURN_ON_ERROR(lcd_fill_circle(cx, cy, bg_radius, icon_bg), TAG, "draw icon bg failed");
@@ -2351,6 +4186,10 @@ static esp_err_t draw_metric_card(int x, int y, int w, int h,
     const uint16_t card = mix_color(rgb565(5, 10, 28), accent, 1, 6);
     const uint16_t label_color = rgb565(210, 225, 244);
     int scale = value_scale;
+    const bool compact = w < 72;
+    const int icon_x = x + (compact ? 12 : 17);
+    const int label_x = x + (compact ? 25 : 32);
+    const int label_w = w - (compact ? 29 : 36);
 
     if (text5_width(value, scale) > w - 8) {
         scale = 1;
@@ -2359,9 +4198,9 @@ static esp_err_t draw_metric_card(int x, int y, int w, int h,
     ESP_RETURN_ON_ERROR(lcd_fill_round_rect(x, y, w, h, 8, border), TAG, "draw metric card border failed");
     ESP_RETURN_ON_ERROR(lcd_fill_round_rect(x + 1, y + 1, w - 2, h - 2, 7, card),
                         TAG, "draw metric card failed");
-    ESP_RETURN_ON_ERROR(draw_card_icon(icon_kind, x + 17, y + 10, accent, humidity),
+    ESP_RETURN_ON_ERROR(draw_card_icon(icon_kind, icon_x, y + 10, accent, humidity),
                         TAG, "draw card icon failed");
-    ESP_RETURN_ON_ERROR(draw_text_mixed_limited(x + 32, y + 4, label, w - 36, 1, label_color),
+    ESP_RETURN_ON_ERROR(draw_text_mixed_limited(label_x, y + 4, label, label_w, 1, label_color),
                         TAG, "draw metric label failed");
 
     int value_x = x + (w - text5_width(value, scale)) / 2;
@@ -2378,13 +4217,55 @@ static uint16_t nav_accent(app_view_t current_view, app_view_t target_view,
     return current_view == target_view ? active : normal;
 }
 
+static void nav_card_rect(int index, int count, int *x, int *w)
+{
+    const int total_w = CLOCK_PANEL_W - 28;
+    const int gap = count >= 4 ? 6 : NAV_CARD_GAP;
+    int card_w = (total_w - gap * (count - 1)) / count;
+    if (card_w <= 0) {
+        card_w = NAV_CARD_W;
+    }
+    if (x != NULL) {
+        *x = CLOCK_PANEL_X + 14 + index * (card_w + gap);
+    }
+    if (w != NULL) {
+        *w = card_w;
+    }
+}
+
+static int nav_card_count(bool show_komari)
+{
+    (void)show_komari;
+    return 3;
+}
+
+static app_view_t nav_card_target_view(int index, bool show_komari)
+{
+    switch (index) {
+    case 0:
+        return APP_VIEW_ANALOG_CLOCK;
+    case 1:
+        return show_komari ? APP_VIEW_WEATHER : APP_VIEW_CALENDAR;
+    case 2:
+        return show_komari ? APP_VIEW_KOMARI : APP_VIEW_WEATHER;
+    default:
+        return APP_VIEW_DASHBOARD;
+    }
+}
+
 static esp_err_t draw_nav_cards(const struct tm *tm, app_view_t current_view,
                                 const weather_info_t *weather)
 {
     char card_time_buf[32];
     char short_date_buf[32];
     char hum_buf[16];
+    char komari_buf[16];
     int humidity = -1;
+    int card_x = 0;
+    int card_w = 0;
+    bool show_komari = komari_configured();
+    int card_count = nav_card_count(show_komari);
+    komari_info_t komari = {0};
 
     snprintf(card_time_buf, sizeof(card_time_buf), "%02d:%02d", tm->tm_hour, tm->tm_min);
     snprintf(short_date_buf, sizeof(short_date_buf), "%02d/%02d", tm->tm_mon + 1, tm->tm_mday);
@@ -2395,23 +4276,55 @@ static esp_err_t draw_nav_cards(const struct tm *tm, app_view_t current_view,
         strlcpy(hum_buf, "--%", sizeof(hum_buf));
     }
 
-    ESP_RETURN_ON_ERROR(draw_metric_card(NAV_CARD_X0, NAV_CARD_Y, NAV_CARD_W, NAV_CARD_H,
+    if (show_komari) {
+        komari_get_snapshot(&komari);
+        if (!komari.valid) {
+            strlcpy(komari_buf, "WAIT", sizeof(komari_buf));
+        } else if (komari.online_valid && komari.node_count >= 0) {
+            snprintf(komari_buf, sizeof(komari_buf), "%d/%d", komari.online_count, komari.node_count);
+        } else if (komari.online_valid) {
+            snprintf(komari_buf, sizeof(komari_buf), "%d", komari.online_count);
+        } else if (komari.nodes_valid) {
+            snprintf(komari_buf, sizeof(komari_buf), "--/%d", komari.node_count);
+        } else {
+            strlcpy(komari_buf, "ERR", sizeof(komari_buf));
+        }
+    }
+
+    nav_card_rect(0, card_count, &card_x, &card_w);
+    ESP_RETURN_ON_ERROR(draw_metric_card(card_x, NAV_CARD_Y, card_w, NAV_CARD_H,
                                          "时间", card_time_buf, NAV_CARD_VALUE_SCALE,
                                          nav_accent(current_view, APP_VIEW_ANALOG_CLOCK,
                                                     rgb565(45, 147, 255), rgb565(105, 207, 255)),
                                          0, -1),
                         TAG, "draw time nav failed");
-    ESP_RETURN_ON_ERROR(draw_metric_card(NAV_CARD_X1, NAV_CARD_Y, NAV_CARD_W, NAV_CARD_H,
-                                         "日期", short_date_buf, NAV_CARD_VALUE_SCALE,
-                                         nav_accent(current_view, APP_VIEW_CALENDAR,
-                                                    rgb565(186, 85, 255), rgb565(227, 124, 255)),
-                                         1, -1),
-                        TAG, "draw date nav failed");
-    return draw_metric_card(NAV_CARD_X2, NAV_CARD_Y, NAV_CARD_W, NAV_CARD_H,
-                            "湿度", hum_buf, NAV_CARD_VALUE_SCALE,
-                            nav_accent(current_view, APP_VIEW_WEATHER,
-                                       rgb565(30, 226, 214), rgb565(95, 255, 221)),
-                            2, humidity);
+    if (!show_komari) {
+        nav_card_rect(1, card_count, &card_x, &card_w);
+        ESP_RETURN_ON_ERROR(draw_metric_card(card_x, NAV_CARD_Y, card_w, NAV_CARD_H,
+                                             "日期", short_date_buf, NAV_CARD_VALUE_SCALE,
+                                             nav_accent(current_view, APP_VIEW_CALENDAR,
+                                                        rgb565(186, 85, 255), rgb565(227, 124, 255)),
+                                             1, -1),
+                            TAG, "draw date nav failed");
+    }
+
+    nav_card_rect(show_komari ? 1 : 2, card_count, &card_x, &card_w);
+    ESP_RETURN_ON_ERROR(draw_metric_card(card_x, NAV_CARD_Y, card_w, NAV_CARD_H,
+                                         "湿度", hum_buf, NAV_CARD_VALUE_SCALE,
+                                         nav_accent(current_view, APP_VIEW_WEATHER,
+                                                    rgb565(30, 226, 214), rgb565(95, 255, 221)),
+                                         show_komari ? 1 : 2, humidity),
+                        TAG, "draw humidity nav failed");
+    if (!show_komari) {
+        return ESP_OK;
+    }
+
+    nav_card_rect(2, card_count, &card_x, &card_w);
+    return draw_metric_card(card_x, NAV_CARD_Y, card_w, NAV_CARD_H,
+                            "KOMARI", komari_buf, NAV_CARD_VALUE_SCALE,
+                            nav_accent(current_view, APP_VIEW_KOMARI,
+                                       rgb565(255, 185, 85), rgb565(255, 220, 125)),
+                            2, -1);
 }
 
 static esp_err_t draw_clock_screen(const struct tm *tm)
@@ -2450,7 +4363,6 @@ static esp_err_t draw_clock_screen(const struct tm *tm)
                         TAG, "fill canvas failed");
     ESP_RETURN_ON_ERROR(draw_panel_frame(), TAG, "draw panel failed");
     ESP_RETURN_ON_ERROR(draw_scenic_background(), TAG, "draw scenic background failed");
-
     ESP_RETURN_ON_ERROR(draw_wifi_icon(CLOCK_PANEL_X + 12, CLOCK_PANEL_Y + 8,
                                        s_wifi_connected || s_prov_active),
                         TAG, "draw wifi icon failed");
@@ -2938,15 +4850,328 @@ static esp_err_t draw_weather_screen(const struct tm *tm)
     return lcd_canvas_flush();
 }
 
+static bool today_hour_is_current(const char *time_text)
+{
+    int hour = -1;
+    int minute = -1;
+    if (time_text == NULL ||
+        sscanf(time_text, "%d:%d", &hour, &minute) != 2 ||
+        hour < 0 || hour > 23 ||
+        minute < 0 || minute > 59) {
+        return false;
+    }
+
+    time_t now = 0;
+    time(&now);
+    struct tm now_tm = {0};
+    localtime_r(&now, &now_tm);
+    return hour == now_tm.tm_hour;
+}
+
+static esp_err_t draw_today_hourly_card(int x, int y, int w, int h,
+                                        const char *time_text,
+                                        const char *condition,
+                                        int temp_c,
+                                        int humidity,
+                                        bool current)
+{
+    const uint16_t text = rgb565(222, 238, 248);
+    const uint16_t muted = rgb565(126, 146, 174);
+    const uint16_t accent = current ? rgb565(255, 211, 85) : rgb565(76, 226, 255);
+    const uint16_t border = current ? rgb565(255, 211, 85) : rgb565(31, 48, 68);
+    const uint16_t card = current ? rgb565(44, 39, 33) : rgb565(8, 15, 31);
+    char temp_buf[12];
+    char hum_buf[12];
+    int temp_x = 0;
+
+    snprintf(temp_buf, sizeof(temp_buf), "%dC", temp_c);
+    snprintf(hum_buf, sizeof(hum_buf), "RH%d%%", humidity);
+    temp_x = x + w - text5_width(temp_buf, 2) - 9;
+
+    ESP_RETURN_ON_ERROR(lcd_fill_round_rect(x, y, w, h, 5, border),
+                        TAG, "draw hourly card border failed");
+    ESP_RETURN_ON_ERROR(lcd_fill_round_rect(x + 1, y + 1, w - 2, h - 2, 4, card),
+                        TAG, "draw hourly card failed");
+    if (current) {
+        ESP_RETURN_ON_ERROR(lcd_fill_round_rect(x + 3, y + 3, 3, h - 6, 2, accent),
+                            TAG, "draw hourly current mark failed");
+    }
+    ESP_RETURN_ON_ERROR(draw_text5(x + (current ? 11 : 8), y + 5,
+                                   time_text != NULL ? time_text : "--:--", 1,
+                                   current ? accent : text),
+                        TAG, "draw hourly card time failed");
+    ESP_RETURN_ON_ERROR(draw_text5(x + (current ? 11 : 8), y + h - 10, hum_buf, 1, muted),
+                        TAG, "draw hourly card humidity failed");
+    ESP_RETURN_ON_ERROR(draw_weather_mini_symbol(condition, x + 61, y + h / 2, accent),
+                        TAG, "draw hourly card mini failed");
+    return draw_text5(temp_x, y + 7, temp_buf, 2, accent);
+}
+
+static esp_err_t draw_today_page_indicator(int page)
+{
+    const uint16_t muted = rgb565(133, 158, 181);
+    const uint16_t active = rgb565(255, 211, 85);
+    char page_buf[8];
+
+    if (page < 0) {
+        page = 0;
+    } else if (page >= TODAY_HOURLY_PAGE_COUNT) {
+        page = TODAY_HOURLY_PAGE_COUNT - 1;
+    }
+
+    snprintf(page_buf, sizeof(page_buf), "%d/%d", page + 1, TODAY_HOURLY_PAGE_COUNT);
+    ESP_RETURN_ON_ERROR(draw_text5(CLOCK_PANEL_X + CLOCK_PANEL_W - text5_width(page_buf, 1) - 14,
+                                   CLOCK_PANEL_Y + 8, page_buf, 1, active),
+                        TAG, "draw today page text failed");
+    for (int i = 0; i < TODAY_HOURLY_PAGE_COUNT; ++i) {
+        ESP_RETURN_ON_ERROR(lcd_fill_circle(CLOCK_PANEL_X + CLOCK_PANEL_W - 48 + i * 10,
+                                            CLOCK_PANEL_Y + 12, 2,
+                                            i == page ? active : muted),
+                            TAG, "draw today page dot failed");
+    }
+    return ESP_OK;
+}
+
+static esp_err_t draw_today_hourly_rows(const weather_info_t *weather, int page)
+{
+    const uint16_t muted = rgb565(133, 158, 181);
+    const int row_x = CLOCK_PANEL_X + 10;
+    const int col_gap = 8;
+    const int col_w = (CLOCK_PANEL_W - 20 - col_gap) / 2;
+    const int row_y0 = CLOCK_PANEL_Y + 16;
+    const int row_h = 31;
+    const int card_h = 29;
+    const int rows_per_col = 6;
+    int page_offset = 0;
+
+    if (page < 0) {
+        page = 0;
+    } else if (page >= TODAY_HOURLY_PAGE_COUNT) {
+        page = TODAY_HOURLY_PAGE_COUNT - 1;
+    }
+    page_offset = page * TODAY_HOURLY_ITEMS_PER_PAGE;
+
+    if (weather == NULL || weather->hourly_count <= 0) {
+        ESP_RETURN_ON_ERROR(draw_text5_centered(160, CLOCK_PANEL_Y + 103, "WAIT", 2, muted),
+                            TAG, "draw hourly empty failed");
+        return ESP_OK;
+    }
+
+    for (int i = 0; i < TODAY_HOURLY_ITEMS_PER_PAGE; ++i) {
+        int idx = page_offset + i;
+        const bool valid = idx < weather->hourly_count && weather->hourly[idx].valid;
+        const char *condition = valid ? weather->hourly[idx].condition : NULL;
+        int col = i / rows_per_col;
+        int row = i % rows_per_col;
+        int x = row_x + col * (col_w + col_gap);
+        int y = row_y0 + row * row_h;
+
+        if (!valid || idx >= WEATHER_HOURLY_SLOTS || col >= 2) {
+            continue;
+        }
+
+        ESP_RETURN_ON_ERROR(draw_today_hourly_card(x, y, col_w, card_h,
+                                                   weather->hourly[idx].time,
+                                                   condition,
+                                                   weather->hourly[idx].temp_c,
+                                                   weather->hourly[idx].humidity,
+                                                   today_hour_is_current(weather->hourly[idx].time)),
+                            TAG, "draw hourly card failed");
+    }
+    return ESP_OK;
+}
+
+static esp_err_t draw_today_weather_screen(const struct tm *tm)
+{
+    weather_info_t weather = {0};
+    (void)tm;
+
+    weather_get_snapshot(&weather);
+
+    ESP_RETURN_ON_ERROR(draw_view_background(rgb565(6, 9, 24), rgb565(18, 20, 34)),
+                        TAG, "draw today bg failed");
+
+    ESP_RETURN_ON_ERROR(draw_today_page_indicator(s_today_hourly_page),
+                        TAG, "draw today page indicator failed");
+    ESP_RETURN_ON_ERROR(draw_today_hourly_rows(&weather, s_today_hourly_page),
+                        TAG, "draw today hourly rows failed");
+    return lcd_canvas_flush();
+}
+
+static esp_err_t draw_komari_detail_row(int y, const char *label, const char *value,
+                                        uint16_t label_color, uint16_t value_color)
+{
+    const uint16_t line = rgb565(30, 43, 66);
+    const int x = CLOCK_PANEL_X + 18;
+    const int value_x = CLOCK_PANEL_X + 86;
+
+    ESP_RETURN_ON_ERROR(draw_text5(x, y + 1, label, 1, label_color), TAG, "draw komari label failed");
+    ESP_RETURN_ON_ERROR(draw_text_mixed_limited(value_x, y, value != NULL ? value : "--",
+                                                CLOCK_PANEL_X + CLOCK_PANEL_W - value_x - 16,
+                                                1, value_color),
+                        TAG, "draw komari value failed");
+    return lcd_draw_hline(x, y + 13, CLOCK_PANEL_W - 36, line);
+}
+
+static esp_err_t draw_komari_screen(const struct tm *tm)
+{
+    komari_info_t komari = {0};
+    const uint16_t text = rgb565(232, 240, 255);
+    const uint16_t muted = rgb565(145, 161, 196);
+    const uint16_t accent = rgb565(255, 185, 85);
+    const uint16_t band_top = rgb565(34, 26, 20);
+    const uint16_t band_bottom = rgb565(50, 36, 26);
+    char online_buf[24];
+    char nodes_buf[16];
+    char private_buf[8];
+    char record_buf[8];
+    char updated_buf[16];
+
+    komari_get_snapshot(&komari);
+    if (!komari.configured) {
+        strlcpy(online_buf, "NOT SET", sizeof(online_buf));
+        strlcpy(nodes_buf, "--", sizeof(nodes_buf));
+        strlcpy(private_buf, "--", sizeof(private_buf));
+        strlcpy(record_buf, "--", sizeof(record_buf));
+        strlcpy(updated_buf, "UP --:--", sizeof(updated_buf));
+    } else {
+        if (!komari.valid) {
+            strlcpy(online_buf, "WAIT", sizeof(online_buf));
+        } else if (komari.online_valid && komari.node_count >= 0) {
+            snprintf(online_buf, sizeof(online_buf), "%d/%d", komari.online_count, komari.node_count);
+        } else if (komari.online_valid) {
+            snprintf(online_buf, sizeof(online_buf), "%d", komari.online_count);
+        } else if (komari.nodes_valid) {
+            snprintf(online_buf, sizeof(online_buf), "--/%d", komari.node_count);
+        } else {
+            strlcpy(online_buf, "ERR", sizeof(online_buf));
+        }
+
+        if (komari.nodes_valid && komari.node_count >= 0) {
+            snprintf(nodes_buf, sizeof(nodes_buf), "%d", komari.node_count);
+        } else {
+            strlcpy(nodes_buf, "--", sizeof(nodes_buf));
+        }
+        strlcpy(private_buf, komari.public_valid ? (komari.private_site ? "YES" : "NO") : "--",
+                sizeof(private_buf));
+        strlcpy(record_buf, komari.public_valid ? (komari.record_enabled ? "YES" : "NO") : "--",
+                sizeof(record_buf));
+        if (komari.updated_at > 0) {
+            struct tm updated_tm = {0};
+            localtime_r(&komari.updated_at, &updated_tm);
+            snprintf(updated_buf, sizeof(updated_buf), "UP %02d:%02d",
+                     updated_tm.tm_hour, updated_tm.tm_min);
+        } else {
+            strlcpy(updated_buf, "UP --:--", sizeof(updated_buf));
+        }
+    }
+
+    ESP_RETURN_ON_ERROR(draw_view_background(rgb565(8, 9, 22), rgb565(20, 17, 26)),
+                        TAG, "draw komari bg failed");
+    ESP_RETURN_ON_ERROR(draw_view_header("KOMARI", tm), TAG, "draw komari header failed");
+
+    ESP_RETURN_ON_ERROR(lcd_fill_vertical_blend_rect(CLOCK_PANEL_X + 1, CLOCK_PANEL_Y + 43,
+                                                     CLOCK_PANEL_W - 2, 34,
+                                                     band_top, band_bottom),
+                        TAG, "draw komari band failed");
+    ESP_RETURN_ON_ERROR(draw_text5(CLOCK_PANEL_X + 20, CLOCK_PANEL_Y + 56,
+                                   "ONLINE", 1, muted),
+                        TAG, "draw komari online label failed");
+    ESP_RETURN_ON_ERROR(draw_text5(CLOCK_PANEL_X + CLOCK_PANEL_W - text5_width(online_buf, 3) - 22,
+                                   CLOCK_PANEL_Y + 49, online_buf, 3, accent),
+                        TAG, "draw komari online failed");
+
+    ESP_RETURN_ON_ERROR(draw_komari_detail_row(CLOCK_PANEL_Y + 84, "SITE",
+                                               komari.configured ? komari.sitename : "NOT SET",
+                                               accent, text),
+                        TAG, "draw komari site failed");
+    ESP_RETURN_ON_ERROR(draw_komari_detail_row(CLOCK_PANEL_Y + 99, "DESC",
+                                               komari.configured ? komari.description : "--",
+                                               muted, text),
+                        TAG, "draw komari desc failed");
+    ESP_RETURN_ON_ERROR(draw_komari_detail_row(CLOCK_PANEL_Y + 114, "NODES",
+                                               nodes_buf, muted, text),
+                        TAG, "draw komari nodes failed");
+    ESP_RETURN_ON_ERROR(draw_komari_detail_row(CLOCK_PANEL_Y + 129, "THEME",
+                                               komari.configured ? komari.theme : "--",
+                                               muted, text),
+                        TAG, "draw komari theme failed");
+    ESP_RETURN_ON_ERROR(draw_komari_detail_row(CLOCK_PANEL_Y + 144, "VER",
+                                               komari.configured ? komari.version : "--",
+                                               muted, text),
+                        TAG, "draw komari version failed");
+    ESP_RETURN_ON_ERROR(draw_komari_detail_row(CLOCK_PANEL_Y + 159, "PRIVATE",
+                                               private_buf, muted, text),
+                        TAG, "draw komari private failed");
+    ESP_RETURN_ON_ERROR(draw_komari_detail_row(CLOCK_PANEL_Y + 174, "RECORD",
+                                               record_buf, muted, text),
+                        TAG, "draw komari record failed");
+    ESP_RETURN_ON_ERROR(draw_komari_detail_row(CLOCK_PANEL_Y + 189, "UP",
+                                               updated_buf, muted, text),
+                        TAG, "draw komari update failed");
+    return lcd_canvas_flush();
+}
+
+static esp_err_t draw_wifi_reprovision_confirm_screen(const struct tm *tm)
+{
+    const uint16_t text = rgb565(232, 240, 255);
+    const uint16_t muted = rgb565(145, 161, 196);
+    const uint16_t accent = rgb565(255, 211, 85);
+    const uint16_t border = rgb565(84, 116, 160);
+    const uint16_t box = rgb565(8, 14, 32);
+    const uint16_t yes_bg = rgb565(255, 196, 76);
+    const uint16_t no_bg = rgb565(36, 48, 78);
+    const uint16_t dark = rgb565(15, 20, 30);
+
+    ESP_RETURN_ON_ERROR(draw_view_background(rgb565(5, 8, 22), rgb565(12, 18, 34)),
+                        TAG, "draw wifi confirm bg failed");
+    ESP_RETURN_ON_ERROR(draw_view_header("WIFI", tm), TAG, "draw wifi confirm header failed");
+
+    ESP_RETURN_ON_ERROR(lcd_fill_round_rect(WIFI_CONFIRM_BOX_X, WIFI_CONFIRM_BOX_Y,
+                                            WIFI_CONFIRM_BOX_W, WIFI_CONFIRM_BOX_H, 8, border),
+                        TAG, "draw wifi confirm border failed");
+    ESP_RETURN_ON_ERROR(lcd_fill_round_rect(WIFI_CONFIRM_BOX_X + 2, WIFI_CONFIRM_BOX_Y + 2,
+                                            WIFI_CONFIRM_BOX_W - 4, WIFI_CONFIRM_BOX_H - 4, 7, box),
+                        TAG, "draw wifi confirm box failed");
+    ESP_RETURN_ON_ERROR(draw_text5_centered(160, WIFI_CONFIRM_BOX_Y + 22,
+                                            "SETUP WIFI?", 1, text),
+                        TAG, "draw wifi confirm title failed");
+    ESP_RETURN_ON_ERROR(draw_text5_centered(160, WIFI_CONFIRM_BOX_Y + 43,
+                                            "OPEN AP MODE", 1, muted),
+                        TAG, "draw wifi confirm body failed");
+
+    ESP_RETURN_ON_ERROR(lcd_fill_round_rect(WIFI_CONFIRM_YES_X, WIFI_CONFIRM_YES_Y,
+                                            WIFI_CONFIRM_BUTTON_W, WIFI_CONFIRM_BUTTON_H,
+                                            6, yes_bg),
+                        TAG, "draw wifi yes button failed");
+    ESP_RETURN_ON_ERROR(lcd_fill_round_rect(WIFI_CONFIRM_NO_X, WIFI_CONFIRM_NO_Y,
+                                            WIFI_CONFIRM_BUTTON_W, WIFI_CONFIRM_BUTTON_H,
+                                            6, no_bg),
+                        TAG, "draw wifi no button failed");
+    ESP_RETURN_ON_ERROR(draw_text5_centered(WIFI_CONFIRM_YES_X + WIFI_CONFIRM_BUTTON_W / 2,
+                                            WIFI_CONFIRM_YES_Y + 8, "YES", 1, dark),
+                        TAG, "draw wifi yes text failed");
+    ESP_RETURN_ON_ERROR(draw_text5_centered(WIFI_CONFIRM_NO_X + WIFI_CONFIRM_BUTTON_W / 2,
+                                            WIFI_CONFIRM_NO_Y + 8, "NO", 1, accent),
+                        TAG, "draw wifi no text failed");
+    return lcd_canvas_flush();
+}
+
 static esp_err_t draw_current_view(const struct tm *tm, app_view_t view)
 {
     switch (view) {
+    case APP_VIEW_TODAY_WEATHER:
+        return draw_today_weather_screen(tm);
+    case APP_VIEW_WIFI_CONFIRM:
+        return draw_wifi_reprovision_confirm_screen(tm);
     case APP_VIEW_ANALOG_CLOCK:
         return draw_analog_clock_screen(tm);
     case APP_VIEW_CALENDAR:
         return draw_calendar_screen(tm);
     case APP_VIEW_WEATHER:
         return draw_weather_screen(tm);
+    case APP_VIEW_KOMARI:
+        return draw_komari_screen(tm);
     case APP_VIEW_DASHBOARD:
     default:
         return draw_clock_screen(tm);
@@ -3143,6 +5368,9 @@ static esp_err_t provisioning_root_handler(httpd_req_t *req)
         "<form method='post' action='/save'>"
         "<label>Wi-Fi 名称</label><input name='ssid' maxlength='32' autocomplete='off' required>"
         "<label>Wi-Fi 密码</label><input name='password' maxlength='64' type='password' autocomplete='current-password'>"
+        "<label>Komari 地址（可选）</label><input name='komari_url' maxlength='191' autocomplete='off' "
+        "placeholder='https://komari.example.com'>"
+        "<p class='hint'>填写后首页会显示 Komari 在线状态栏，留空则关闭。</p>"
         "<button type='submit'>保存并连接</button></form>"
         "<p class='hint'>如果手机没有自动弹出页面，请在浏览器打开 192.168.4.1。</p>"
         "</main></body></html>");
@@ -3170,17 +5398,31 @@ static esp_err_t provisioning_save_handler(httpd_req_t *req)
 
     char ssid[WIFI_SSID_LEN] = {0};
     char password[WIFI_PASSWORD_LEN] = {0};
+    char komari_url[KOMARI_URL_LEN] = {0};
+    char normalized_komari_url[KOMARI_URL_LEN] = {0};
     form_get_value(form, "ssid", ssid, sizeof(ssid));
     form_get_value(form, "password", password, sizeof(password));
+    form_get_value(form, "komari_url", komari_url, sizeof(komari_url));
     char *trimmed_ssid = trim_ascii(ssid);
+    char *trimmed_komari_url = trim_ascii(komari_url);
     if (strlen(trimmed_ssid) == 0) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "empty ssid");
+        return ESP_FAIL;
+    }
+    if (!komari_normalize_url(trimmed_komari_url, normalized_komari_url,
+                              sizeof(normalized_komari_url))) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid komari url");
         return ESP_FAIL;
     }
 
     esp_err_t ret = wifi_credentials_save(trimmed_ssid, password);
     if (ret != ESP_OK) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "save failed");
+        return ESP_FAIL;
+    }
+    ret = komari_config_save(normalized_komari_url);
+    if (ret != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "save komari failed");
         return ESP_FAIL;
     }
 
@@ -3448,7 +5690,7 @@ static esp_err_t wifi_start_if_needed(void)
     return ESP_OK;
 }
 
-static esp_err_t provisioning_start(void)
+static esp_err_t provisioning_start(bool saved_credentials_available)
 {
 #if CONFIG_CLOCK_PROV_ENABLE
     provisioning_make_ap_ssid();
@@ -3468,7 +5710,7 @@ static esp_err_t provisioning_start(void)
 
     s_sta_retry_enabled = false;
     s_wifi_connected = false;
-    s_wifi_configured = false;
+    s_wifi_configured = saved_credentials_available;
     s_connected_ssid[0] = '\0';
     if (s_wifi_event_group != NULL) {
         xEventGroupClearBits(s_wifi_event_group, WIFI_CONNECTED_BIT | WIFI_FAIL_BIT);
@@ -3488,11 +5730,13 @@ static esp_err_t provisioning_start(void)
     }
     s_prov_active = true;
 
-    ESP_LOGI(TAG, "provisioning portal started: SSID=%s URL=%s auth=%s",
+    ESP_LOGI(TAG, "provisioning portal started: SSID=%s URL=%s auth=%s saved_creds=%d",
              s_prov_ap_ssid, s_captive_portal_uri,
-             ap_config.ap.authmode == WIFI_AUTH_OPEN ? "open" : "wpa2");
+             ap_config.ap.authmode == WIFI_AUTH_OPEN ? "open" : "wpa2",
+             saved_credentials_available);
     return ESP_OK;
 #else
+    (void)saved_credentials_available;
     return ESP_ERR_NOT_SUPPORTED;
 #endif
 }
@@ -3659,6 +5903,20 @@ static void start_weather_task_once(void)
 #endif
 }
 
+static void start_komari_task_once(void)
+{
+    if (s_komari_task_started || s_wifi_event_group == NULL || !komari_configured()) {
+        return;
+    }
+
+    BaseType_t task_ok = xTaskCreate(komari_task, "komari", KOMARI_TASK_STACK_SIZE, NULL, 4, NULL);
+    if (task_ok == pdPASS) {
+        s_komari_task_started = true;
+    } else {
+        ESP_LOGE(TAG, "create Komari task failed");
+    }
+}
+
 static void network_task(void *arg)
 {
     (void)arg;
@@ -3670,50 +5928,84 @@ static void network_task(void *arg)
         return;
     }
     start_weather_task_once();
+    start_komari_task_once();
 
     for (;;) {
         wifi_credentials_t creds = {0};
+        bool saved_credentials_available = false;
+        bool force_provisioning = false;
         ret = wifi_credentials_load(&creds);
         if (ret == ESP_OK) {
+            saved_credentials_available = true;
+        }
+
+        force_provisioning = wifi_reprovision_request_take();
+        if (force_provisioning) {
+            ESP_LOGI(TAG, "manual provisioning requested");
+        }
+
+        if (ret == ESP_OK && !force_provisioning) {
             ESP_LOGI(TAG, "try Wi-Fi SSID=%s source=%s", creds.ssid, creds.from_nvs ? "nvs" : "kconfig");
             provisioning_stop();
             ret = wifi_connect_with_credentials(&creds, pdMS_TO_TICKS(20000));
             if (ret == ESP_OK) {
+                start_komari_task_once();
                 bool new_credentials = false;
+                bool retry_saved_credentials = false;
                 for (;;) {
                     if (!s_time_synced) {
                         (void)sync_time_with_sntp();
                     }
                     TickType_t wait_ticks = s_time_synced ? portMAX_DELAY : pdMS_TO_TICKS(60000);
                     EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group,
-                                                           WIFI_FAIL_BIT | WIFI_PROV_DONE_BIT,
+                                                           WIFI_FAIL_BIT | WIFI_PROV_DONE_BIT |
+                                                           WIFI_FORCE_PROV_BIT,
                                                            pdTRUE, pdFALSE, wait_ticks);
                     if (bits & WIFI_PROV_DONE_BIT) {
                         new_credentials = true;
                         break;
                     }
+                    if (bits & WIFI_FORCE_PROV_BIT) {
+                        s_wifi_force_prov_pending = false;
+                        force_provisioning = true;
+                        ESP_LOGI(TAG, "manual provisioning requested");
+                        break;
+                    }
                     if (bits & WIFI_FAIL_BIT) {
-                        ESP_LOGW(TAG, "Wi-Fi lost after retries, enter provisioning");
+                        ESP_LOGW(TAG, "Wi-Fi lost after retries, keep saved credentials and open temporary provisioning");
+                        retry_saved_credentials = true;
                         break;
                     }
                 }
                 if (new_credentials) {
                     continue;
                 }
+                if (retry_saved_credentials) {
+                    ESP_LOGI(TAG, "saved Wi-Fi credentials remain available for automatic retry");
+                }
             }
-        } else {
+        } else if (ret != ESP_OK) {
             ESP_LOGI(TAG, "no Wi-Fi credentials found");
         }
 
-        ret = provisioning_start();
+        ret = provisioning_start(saved_credentials_available);
         if (ret != ESP_OK) {
             ESP_LOGW(TAG, "provisioning unavailable: %s", esp_err_to_name(ret));
             vTaskDelay(pdMS_TO_TICKS(10000));
             continue;
         }
 
-        xEventGroupWaitBits(s_wifi_event_group, WIFI_PROV_DONE_BIT, pdTRUE, pdFALSE, portMAX_DELAY);
-        ESP_LOGI(TAG, "new Wi-Fi credentials submitted");
+        TickType_t provisioning_wait_ticks = saved_credentials_available ?
+                                             pdMS_TO_TICKS(WIFI_SAVED_CREDENTIALS_RETRY_MS) :
+                                             portMAX_DELAY;
+        EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group, WIFI_PROV_DONE_BIT,
+                                               pdTRUE, pdFALSE, provisioning_wait_ticks);
+        if (bits & WIFI_PROV_DONE_BIT) {
+            ESP_LOGI(TAG, "new Wi-Fi credentials submitted");
+        } else if (saved_credentials_available) {
+            ESP_LOGI(TAG, "no new Wi-Fi credentials submitted, retry saved Wi-Fi credentials");
+            provisioning_stop();
+        }
     }
 }
 
@@ -3891,12 +6183,18 @@ static bool point_in_rect(int x, int y, int rect_x, int rect_y, int rect_w, int 
 static const char *view_name(app_view_t view)
 {
     switch (view) {
+    case APP_VIEW_TODAY_WEATHER:
+        return "today-weather";
+    case APP_VIEW_WIFI_CONFIRM:
+        return "wifi-confirm";
     case APP_VIEW_ANALOG_CLOCK:
         return "time";
     case APP_VIEW_CALENDAR:
         return "calendar";
     case APP_VIEW_WEATHER:
         return "weather";
+    case APP_VIEW_KOMARI:
+        return "komari";
     case APP_VIEW_DASHBOARD:
     default:
         return "dashboard";
@@ -3929,21 +6227,59 @@ static bool touch_poll_view_change(app_view_t *view)
     s_touch.last_trigger_tick = now;
 
     app_view_t next_view = *view;
-    if (*view != APP_VIEW_DASHBOARD) {
+    int nav_x = 0;
+    int nav_w = 0;
+    bool show_komari = komari_configured();
+    int nav_count = nav_card_count(show_komari);
+    bool redraw = false;
+
+    if (*view == APP_VIEW_WIFI_CONFIRM) {
+        if (point_in_rect(x, y, WIFI_CONFIRM_YES_X, WIFI_CONFIRM_YES_Y,
+                          WIFI_CONFIRM_BUTTON_W, WIFI_CONFIRM_BUTTON_H)) {
+            request_wifi_reprovision();
+            next_view = APP_VIEW_DASHBOARD;
+        } else if (point_in_rect(x, y, WIFI_CONFIRM_NO_X, WIFI_CONFIRM_NO_Y,
+                                 WIFI_CONFIRM_BUTTON_W, WIFI_CONFIRM_BUTTON_H) ||
+                   !point_in_rect(x, y, WIFI_CONFIRM_BOX_X, WIFI_CONFIRM_BOX_Y,
+                                  WIFI_CONFIRM_BOX_W, WIFI_CONFIRM_BOX_H)) {
+            next_view = APP_VIEW_DASHBOARD;
+        }
+    } else if (point_in_rect(x, y, WIFI_STATUS_HIT_X, WIFI_STATUS_HIT_Y,
+                             WIFI_STATUS_HIT_W, WIFI_STATUS_HIT_H)) {
+        next_view = APP_VIEW_WIFI_CONFIRM;
+    } else if (*view == APP_VIEW_TODAY_WEATHER) {
+        if (x >= CLOCK_PANEL_X + CLOCK_PANEL_W / 2) {
+            if (s_today_hourly_page < TODAY_HOURLY_PAGE_COUNT - 1) {
+                ++s_today_hourly_page;
+                redraw = true;
+            }
+        } else if (s_today_hourly_page > 0) {
+            --s_today_hourly_page;
+            redraw = true;
+        } else {
+            next_view = APP_VIEW_DASHBOARD;
+        }
+    } else if (*view != APP_VIEW_DASHBOARD) {
         next_view = APP_VIEW_DASHBOARD;
-    } else if (point_in_rect(x, y, NAV_CARD_X0, NAV_CARD_Y, NAV_CARD_W, NAV_CARD_H)) {
+    } else if (point_in_rect(x, y, DASHBOARD_WEATHER_HIT_X, DASHBOARD_WEATHER_HIT_Y,
+                             DASHBOARD_WEATHER_HIT_W, DASHBOARD_WEATHER_HIT_H)) {
+        s_today_hourly_page = 0;
+        next_view = APP_VIEW_TODAY_WEATHER;
+    } else {
+        for (int i = 0; i < nav_count; ++i) {
+            nav_card_rect(i, nav_count, &nav_x, &nav_w);
+            if (point_in_rect(x, y, nav_x, NAV_CARD_Y, nav_w, NAV_CARD_H)) {
+                next_view = nav_card_target_view(i, show_komari);
+                break;
+            }
+        }
+    }
+    if (next_view == *view && *view == APP_VIEW_DASHBOARD &&
+        point_in_rect(x, y, CLOCK_PANEL_X + 28, CLOCK_PANEL_Y + 48,
+                      CLOCK_PANEL_W - 56, 60)) {
         next_view = APP_VIEW_ANALOG_CLOCK;
-    } else if (point_in_rect(x, y, NAV_CARD_X1, NAV_CARD_Y, NAV_CARD_W, NAV_CARD_H)) {
-        next_view = APP_VIEW_CALENDAR;
-    } else if (point_in_rect(x, y, NAV_CARD_X2, NAV_CARD_Y, NAV_CARD_W, NAV_CARD_H)) {
-        next_view = APP_VIEW_WEATHER;
-    } else if (*view == APP_VIEW_DASHBOARD &&
-               point_in_rect(x, y, CLOCK_PANEL_X + 28, CLOCK_PANEL_Y + 48,
-                             CLOCK_PANEL_W - 56, 60)) {
-        next_view = APP_VIEW_ANALOG_CLOCK;
-    } else if (*view == APP_VIEW_DASHBOARD &&
-               point_in_rect(x, y, CLOCK_PANEL_X + 14, CLOCK_PANEL_Y + 112,
-                             150, 42)) {
+    } else if (next_view == *view && *view == APP_VIEW_DASHBOARD &&
+               point_in_rect(x, y, CLOCK_PANEL_X + 14, CLOCK_PANEL_Y + 112, 150, 42)) {
         next_view = APP_VIEW_CALENDAR;
     }
 
@@ -3953,7 +6289,7 @@ static bool touch_poll_view_change(app_view_t *view)
         *view = next_view;
         return true;
     }
-    return false;
+    return redraw;
 #else
     (void)view;
     return false;
@@ -4084,10 +6420,19 @@ void app_main(void)
 {
     setenv("TZ", CONFIG_CLOCK_TIMEZONE, 1);
     tzset();
+    esp_reset_reason_t reset_reason = esp_reset_reason();
+    ESP_LOGI(TAG, "boot reset_reason=%s(%d)", reset_reason_name(reset_reason), (int)reset_reason);
+    if (reset_reason == ESP_RST_BROWNOUT) {
+        ESP_LOGW(TAG, "last reset was brownout; check USB cable, power supply and backlight current");
+    }
+    log_runtime_health("boot");
     set_time_from_build();
 
     ESP_ERROR_CHECK(init_nvs());
+    ESP_ERROR_CHECK(network_fetch_lock_init());
     ESP_ERROR_CHECK(weather_state_init());
+    ESP_ERROR_CHECK(komari_state_init());
+    ESP_ERROR_CHECK(komari_config_load());
     ESP_ERROR_CHECK(lcd_init());
     ESP_ERROR_CHECK(touch_init());
     ESP_ERROR_CHECK(draw_static_background());

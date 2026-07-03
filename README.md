@@ -110,11 +110,15 @@ idf.py -p COM3 flash monitor
 
 天气逻辑：
 
-1. 请求 `CONFIG_CLOCK_WEATHER_CN_GEO_URL`，默认 `http://myip.ipip.net/json`。
+1. 请求 `CONFIG_CLOCK_WEATHER_CN_GEO_URL`，默认 `https://api.live.bilibili.com/client/v1/Ip/getInfoNew`。
 2. 如果识别到中国大陆 IP 和城市，优先使用该城市。
 3. 通过 Open-Meteo 地理编码获取经纬度。
 4. 获取当前天气和 7 日预报。
-5. 如果 Open-Meteo 失败，回退到 `CONFIG_CLOCK_WEATHER_URL` 的 wttr.in 文本接口。
+5. Open-Meteo 成功时额外获取当天每小时预报，用于首页右上角天气点击后的 `TODAY` 页面。
+6. 如果 Open-Meteo 预报接口失败，使用 7Timer `civillight` HTTPS 接口作为 7 日预报备用源。
+7. 再使用 wttr.in 文本接口补齐当前天气、温度和湿度。
+
+外网天气和定位请求优先使用 HTTPS，并使用 ESP-IDF 证书包校验证书。如果某个外部服务临时无法完成 TLS 连接，固件会对同一 URL 降级重试一次 HTTP，避免天气功能完全不可用。本地配网页面仍是设备热点内的 `http://192.168.4.1/`。
 
 由于固件只内置少量中文字模，城市名显示使用拼音，例如 `Suzhou`，避免未收录汉字显示为方框。天气状态保留中文：`晴`、`多云`、`雨`、`雪`、`雾`、`雷雨`。
 
