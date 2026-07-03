@@ -1,18 +1,26 @@
 # ESP32-2432S028R Clock
 
-这是一个面向 ESP32-2432S028R / CYD 2.8 寸触摸屏的 ESP-IDF 时钟固件。它使用 ILI9341 横屏显示、XPT2046 触摸、手机热点配网、SNTP 网络对时、IP 定位天气和 7 日天气预报。
+这是一个面向 ESP32-2432S028R / CYD 2.8 寸触摸屏的 ESP-IDF 时钟固件。它使用 ILI9341 横屏显示、XPT2046 触摸、手机热点配网、SNTP 网络对时、IP 定位天气、7 日天气预报、Komari 在线状态和 HTTPS OTA 更新。
 
 ## 功能
 
-- 320x240 横屏时钟首页，显示 Wi-Fi 状态、城市、日期、时间、温度和湿度。
-- 手机连接设备热点后打开配网页面，写入家庭 Wi-Fi SSID 和密码。
+- 320x240 横屏时钟首页，显示 Wi-Fi 状态、城市、日期、时间、天气、温度、湿度和健康状态入口。
+- 手机连接设备热点后打开配网页面，写入家庭 Wi-Fi SSID、密码、Komari 地址和 OTA 地址。
 - 联网后使用 SNTP 自动对时，默认优先使用国内 NTP 服务器。
-- 优先通过国内 IP 定位接口获取中国大陆城市，再用 Open-Meteo 获取当前天气和 7 日预报。
+- 优先通过国内 IP 定位接口获取中国大陆城市，再用 Open-Meteo 获取当前天气、未来 24 小时逐小时预报和 7 日预报。
+- Open-Meteo 预报失败时使用 7Timer HTTPS 接口作为 7 日预报备用源。
+- 可选接入 Komari 服务端，首页显示在线节点数/总节点数，并提供 Komari 详情页。
+- 内置健康状态页，显示运行时间、IP、RSSI、堆内存、重启原因、OTA 分区、天气和 Komari 状态。
+- 支持通过 GitHub Releases 或自定义 HTTPS 地址进行 OTA 更新，默认启用 OTA 回滚保护。
 - 触摸交互：
+  - 点左上角 Wi-Fi 状态，确认后重新进入配网模式。
   - 点时间区域或底部“时间”进入圆盘时钟。
-  - 点日期区域或底部“日期”进入日历。
+  - 点日期区域或底部“日期”进入日历；配置 Komari 后底部会隐藏日期状态栏以避免拥挤。
+  - 点右上角天气进入未来 24 小时逐小时天气页，点右半屏/左半屏翻页。
   - 点底部“湿度”进入天气详情。
-  - 在任意子页面点击任意位置返回首页。
+  - 点健康状态区域进入健康状态页，在健康状态页点击 `UPDATE` 可确认并启动 OTA。
+  - 配置 Komari 后点底部 `KOMARI` 进入 Komari 详情页。
+  - 多数子页面点击空白区域返回首页。
 - 内置轻量 5x7 ASCII 字体和少量 16x16 中文字模，不依赖外部字体文件。
 
 ## 硬件
@@ -94,6 +102,37 @@ idf.py -p COM3 flash monitor
 
 把串口号换成你自己的设备端口。
 
+## OTA 更新
+
+固件支持 HTTPS OTA。默认 OTA 地址为：
+
+```text
+https://github.com/lengyuesky/esp32-2432s028r_clock/releases/latest/download/cyd_clock.bin
+```
+
+进入健康状态页后点击 `UPDATE`，确认后设备会从当前 OTA 地址下载 `cyd_clock.bin`，写入备用 OTA 分区并重启。默认分区表包含两个 0x180000 大小的 OTA 应用分区：
+
+```text
+ota_0: 0x20000  0x180000
+ota_1: 0x1a0000 0x180000
+```
+
+配网页面里的 OTA 地址可以覆盖默认地址；留空则继续使用 GitHub Releases 的默认地址。OTA 地址只支持 HTTPS。
+
+## GitHub Actions 构建
+
+仓库包含 `.github/workflows/build-ota.yml`，会使用 ESP-IDF v5.4.2 构建 OTA 镜像。
+
+- `push` 到 `main`、`pull_request` 和手动 `workflow_dispatch` 会构建固件，并把 `cyd_clock.bin`、`cyd_clock.bin.sha256`、`partition-table.bin`、`ota_data_initial.bin` 上传为 Actions artifact。
+- 发布 GitHub Release 时，会再次构建并把 `cyd_clock.bin` 和 `cyd_clock.bin.sha256` 上传到该 Release 的资产中。
+- 固件默认 OTA 地址使用 `releases/latest/download/cyd_clock.bin`，因此只有已经发布 Release 并存在 `cyd_clock.bin` 资产时，设备才能通过默认地址 OTA。
+
+当前 Release 页面：
+
+```text
+https://github.com/lengyuesky/esp32-2432s028r_clock/releases/latest
+```
+
 ## Wi-Fi 配网
 
 首次启动或没有可用 Wi-Fi 凭据时，设备会开启配网热点：
@@ -104,7 +143,14 @@ idf.py -p COM3 flash monitor
 
 手机连接该热点后，系统通常会自动弹出配网页面。如果没有弹出，手动打开浏览器访问 `http://192.168.4.1/`。
 
-配网成功后，SSID 和密码保存到 NVS。下次启动会优先读取 NVS 中的配置。
+配网页面还可以填写两个可选地址：
+
+- `Komari 地址`：填写后首页底部显示 `KOMARI` 状态栏，内容为在线节点数/总节点数；留空则关闭 Komari 状态栏。
+- `OTA 地址`：填写后覆盖默认 OTA 地址；留空则使用 GitHub Releases 的默认 HTTPS OTA 地址。
+
+配网成功后，Wi-Fi、Komari 和 OTA 配置都会保存到 NVS。下次启动会优先读取 NVS 中的配置。
+
+设备正常运行时也可以点击首页左上角 Wi-Fi 状态，确认后重新进入配网模式，方便更换 Wi-Fi、Komari 地址或 OTA 地址。
 
 ## 天气和定位
 
@@ -114,7 +160,7 @@ idf.py -p COM3 flash monitor
 2. 如果识别到中国大陆 IP 和城市，优先使用该城市。
 3. 通过 Open-Meteo 地理编码获取经纬度。
 4. 获取当前天气和 7 日预报。
-5. Open-Meteo 成功时额外获取当天每小时预报，用于首页右上角天气点击后的 `TODAY` 页面。
+5. Open-Meteo 成功时额外获取未来 24 小时逐小时预报，用于首页右上角天气点击后的逐小时天气页面。
 6. 如果 Open-Meteo 预报接口失败，使用 7Timer `civillight` HTTPS 接口作为 7 日预报备用源。
 7. 再使用 wttr.in 文本接口补齐当前天气、温度和湿度。
 
@@ -138,6 +184,7 @@ idf.py menuconfig
 - `CLOCK_PROV_AP_SSID_PREFIX`：配网热点前缀。
 - `CLOCK_WEATHER_ENABLE`：是否启用天气。
 - `CLOCK_WEATHER_REFRESH_MINUTES`：天气刷新间隔。
+- `CLOCK_OTA_DEFAULT_URL`：默认 HTTPS OTA 固件地址。
 - `CLOCK_TOUCH_*`：XPT2046 引脚、压力阈值和坐标映射。
 - `CLOCK_LCD_*`：LCD 引脚、颜色顺序、字节序和镜像。
 
@@ -147,8 +194,10 @@ idf.py menuconfig
 
 ```text
 .
+├── .github/workflows/            # GitHub Actions OTA 构建工作流
 ├── components/esp_lcd_ili9341/   # ILI9341 面板驱动组件
 ├── main/                         # 主程序、Kconfig 和 UI/网络/触摸逻辑
+├── partitions.csv                # NVS、otadata 和双 OTA 分区表
 ├── scripts/                      # 构建脚本
 ├── sdkconfig.defaults            # 可复现默认配置
 └── README.md
@@ -184,3 +233,13 @@ ESP-IDF 已经会并行编译。WSL 下最大的影响通常是项目位于 Wind
 ### Flash size 警告
 
 如果串口日志提示实际 Flash 大于镜像头中的大小，说明当前配置按 2MB 镜像头构建，但板子可能是 4MB Flash。现有默认分区足够当前固件使用；如需使用更多 Flash，可在 `menuconfig` 中调整 Flash size 和分区表。
+
+### Release 页面没有 OTA 镜像
+
+`main` 分支 push 会构建镜像，但产物默认只在 Actions artifact 中。只有发布 GitHub Release 时，工作流才会把 `cyd_clock.bin` 上传到 Release 资产里。
+
+如果设备使用默认 OTA 地址，请确认最新 Release 中存在 `cyd_clock.bin`：
+
+```text
+https://github.com/lengyuesky/esp32-2432s028r_clock/releases/latest/download/cyd_clock.bin
+```
