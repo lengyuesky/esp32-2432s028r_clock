@@ -55,6 +55,52 @@ jobs:
             ota/partition-table.bin
             ota/ota_data_initial.bin
 
+      - name: Publish OTA image to rolling release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ota-latest
+        shell: bash
+        run: |
+          set -euo pipefail
+          short_sha="${GITHUB_SHA::7}"
+          built_at="$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+          cat > ota/release-notes.md <<EOF
+          Automated OTA build from main.
+
+          Commit: ${GITHUB_SHA}
+          Built: ${built_at}
+
+          OTA URL:
+          https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/cyd_clock.bin
+          EOF
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -f "${RELEASE_TAG}" "${GITHUB_SHA}"
+          git push origin "refs/tags/${RELEASE_TAG}" --force
+
+          if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
+            gh release edit "${RELEASE_TAG}" \
+              --target "${GITHUB_SHA}" \
+              --title "CYD Clock OTA latest (${short_sha})" \
+              --notes-file ota/release-notes.md \
+              --latest
+          else
+            gh release create "${RELEASE_TAG}" \
+              --target "${GITHUB_SHA}" \
+              --title "CYD Clock OTA latest (${short_sha})" \
+              --notes-file ota/release-notes.md \
+              --latest
+          fi
+
+          gh release upload "${RELEASE_TAG}" \
+            ota/cyd_clock.bin \
+            ota/cyd_clock.bin.sha256 \
+            ota/partition-table.bin \
+            ota/ota_data_initial.bin \
+            --clobber
+
       - name: Upload OTA image to release
         if: github.event_name == 'release'
         env:

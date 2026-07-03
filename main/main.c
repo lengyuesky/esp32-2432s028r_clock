@@ -95,6 +95,7 @@
 #define KOMARI_REFRESH_MS 60000
 #define OTA_URL_LEN 256
 #define OTA_TASK_STACK_SIZE 12288
+#define SERIAL_COMMAND_TASK_STACK_SIZE 3072
 #define OTA_HTTP_TIMEOUT_MS 15000
 #define OTA_HTTP_REQUEST_SIZE 4096
 #define OTA_HTTP_BUFFER_SIZE 2048
@@ -137,11 +138,11 @@
 #define HEALTH_OTA_HIT_W 68
 #define HEALTH_OTA_HIT_H 24
 #define OTA_CONFIRM_BOX_X (CLOCK_PANEL_X + 36)
-#define OTA_CONFIRM_BOX_Y (CLOCK_PANEL_Y + 66)
+#define OTA_CONFIRM_BOX_Y (CLOCK_PANEL_Y + 58)
 #define OTA_CONFIRM_BOX_W (CLOCK_PANEL_W - 72)
-#define OTA_CONFIRM_BOX_H 112
+#define OTA_CONFIRM_BOX_H 128
 #define OTA_CONFIRM_YES_X (OTA_CONFIRM_BOX_X + 24)
-#define OTA_CONFIRM_YES_Y (OTA_CONFIRM_BOX_Y + 74)
+#define OTA_CONFIRM_YES_Y (OTA_CONFIRM_BOX_Y + 94)
 #define OTA_CONFIRM_BUTTON_W 76
 #define OTA_CONFIRM_BUTTON_H 26
 #define OTA_CONFIRM_NO_X (OTA_CONFIRM_BOX_X + OTA_CONFIRM_BOX_W - OTA_CONFIRM_BUTTON_W - 24)
@@ -1812,6 +1813,9 @@ static void ota_task(void *arg)
     esp_err_t ret = ESP_OK;
     esp_https_ota_handle_t ota_handle = NULL;
     bool lock_taken = false;
+    int last_read_len = 0;
+    int last_image_size = 0;
+    int last_progress = -1;
     if (!network_fetch_lock_take("ota", pdMS_TO_TICKS(120000))) {
         ret = ESP_ERR_TIMEOUT;
         goto fail;
@@ -1834,6 +1838,7 @@ static void ota_task(void *arg)
     };
 
     ESP_LOGI(TAG, "OTA start: %s", url);
+    ota_set_status(OTA_STATUS_RUNNING, 0, 0, 0, ESP_OK, "CONNECT");
     ret = esp_https_ota_begin(&ota_config, &ota_handle);
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "OTA begin failed: %s", esp_err_to_name(ret));
@@ -1844,7 +1849,17 @@ static void ota_task(void *arg)
         ret = esp_https_ota_perform(ota_handle);
         int read_len = esp_https_ota_get_image_len_read(ota_handle);
         int image_size = esp_https_ota_get_image_size(ota_handle);
+        if (read_len > last_read_len) {
+            last_read_len = read_len;
+        }
+        if (image_size > 0) {
+            last_image_size = image_size;
+        }
         int progress = image_size > 0 ? (read_len * 100) / image_size : -1;
+        if (progress > 100) {
+            progress = 100;
+        }
+        last_progress = progress;
         ota_set_status(OTA_STATUS_RUNNING, progress, read_len, image_size, ESP_OK, "RUN");
         if (ret != ESP_ERR_HTTPS_OTA_IN_PROGRESS) {
             break;
@@ -1869,7 +1884,7 @@ static void ota_task(void *arg)
         goto fail;
     }
 
-    ota_set_status(OTA_STATUS_SUCCESS, 100, 0, 0, ESP_OK, "REBOOT");
+    ota_set_status(OTA_STATUS_SUCCESS, 100, last_read_len, last_image_size, ESP_OK, "REBOOT");
     ESP_LOGI(TAG, "OTA complete, restarting");
     if (lock_taken) {
         network_fetch_lock_give();
@@ -1885,7 +1900,8 @@ fail:
     if (lock_taken) {
         network_fetch_lock_give();
     }
-    ota_set_status(OTA_STATUS_FAILED, -1, 0, 0, ret, esp_err_to_name(ret));
+    ota_set_status(OTA_STATUS_FAILED, last_progress, last_read_len, last_image_size,
+                   ret, esp_err_to_name(ret));
     s_ota_task_running = false;
     vTaskDelete(NULL);
 }
@@ -1929,6 +1945,45 @@ static esp_err_t ota_start_update(void)
         return ESP_ERR_NO_MEM;
     }
     return ESP_OK;
+}
+
+static void serial_command_task(void *arg)
+{
+    (void)arg;
+    char line[64];
+
+    ESP_LOGI(TAG, "serial commands ready: ota, status");
+    while (true) {
+        if (fgets(line, sizeof(line), stdin) == NULL) {
+            clearerr(stdin);
+            vTaskDelay(pdMS_TO_TICKS(250));
+            continue;
+        }
+
+        char *cmd = trim_ascii(line);
+        for (char *p = cmd; *p != '\0'; ++p) {
+            *p = (char)tolower((unsigned char)*p);
+        }
+
+        if (strcmp(cmd, "ota") == 0 || strcmp(cmd, "ota update") == 0) {
+            esp_err_t ret = ota_start_update();
+            ESP_LOGI(TAG, "serial ota command: %s", esp_err_to_name(ret));
+        } else if (strcmp(cmd, "status") == 0) {
+            ota_info_t ota = {0};
+            ota_get_snapshot(&ota);
+            ESP_LOGI(TAG,
+                     "serial status: wifi=%d ota=%s progress=%d read=%d size=%d err=%s heap=%u",
+                     s_wifi_connected,
+                     ota_status_text(ota.status),
+                     ota.progress_percent,
+                     ota.image_read,
+                     ota.image_size,
+                     esp_err_to_name(ota.last_error),
+                     (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT));
+        } else if (cmd[0] != '\0') {
+            ESP_LOGW(TAG, "unknown serial command: %s", cmd);
+        }
+    }
 }
 
 static void komari_reset_info_locked(const char *base_url)
@@ -5748,6 +5803,83 @@ static esp_err_t draw_health_screen(const struct tm *tm)
     return lcd_canvas_flush();
 }
 
+static void ota_format_source_label(const char *url, char *out, size_t out_len)
+{
+    if (out == NULL || out_len == 0) {
+        return;
+    }
+    strlcpy(out, "SRC DEFAULT", out_len);
+    if (url == NULL || url[0] == '\0') {
+        return;
+    }
+
+    if (strstr(url, "github.com/") != NULL && strstr(url, "/releases/latest/") != NULL) {
+        strlcpy(out, "SRC LATEST RELEASE", out_len);
+        return;
+    }
+
+    const char *host = strstr(url, "://");
+    host = host != NULL ? host + 3 : url;
+    size_t host_len = strcspn(host, "/:?#");
+    if (host_len == 0) {
+        return;
+    }
+
+    char host_buf[40] = {0};
+    if (host_len >= sizeof(host_buf)) {
+        host_len = sizeof(host_buf) - 1;
+    }
+    memcpy(host_buf, host, host_len);
+    host_buf[host_len] = '\0';
+    snprintf(out, out_len, "SRC %s", host_buf);
+}
+
+static void ota_format_size_label(const ota_info_t *ota, char *out, size_t out_len)
+{
+    if (out == NULL || out_len == 0) {
+        return;
+    }
+    strlcpy(out, "WAIT", out_len);
+    if (ota == NULL || ota->image_read <= 0) {
+        return;
+    }
+
+    int read_kb = (ota->image_read + 1023) / 1024;
+    if (ota->image_size > 0) {
+        int size_kb = (ota->image_size + 1023) / 1024;
+        snprintf(out, out_len, "%dK/%dK", read_kb, size_kb);
+    } else {
+        snprintf(out, out_len, "%dK", read_kb);
+    }
+}
+
+static esp_err_t draw_ota_progress_bar(int x, int y, int w, int h, int progress_percent,
+                                       uint16_t border, uint16_t track, uint16_t fill)
+{
+    int progress = progress_percent;
+    if (progress < 0) {
+        progress = 0;
+    } else if (progress > 100) {
+        progress = 100;
+    }
+
+    ESP_RETURN_ON_ERROR(lcd_fill_round_rect(x, y, w, h, h / 2, border),
+                        TAG, "draw ota progress border failed");
+    ESP_RETURN_ON_ERROR(lcd_fill_round_rect(x + 2, y + 2, w - 4, h - 4,
+                                            (h - 4) / 2, track),
+                        TAG, "draw ota progress track failed");
+    int fill_w = ((w - 4) * progress) / 100;
+    if (fill_w > 0) {
+        if (fill_w < h - 4) {
+            fill_w = h - 4;
+        }
+        ESP_RETURN_ON_ERROR(lcd_fill_round_rect(x + 2, y + 2, fill_w, h - 4,
+                                                (h - 4) / 2, fill),
+                            TAG, "draw ota progress fill failed");
+    }
+    return ESP_OK;
+}
+
 static esp_err_t draw_ota_confirm_screen(const struct tm *tm)
 {
     const uint16_t text = rgb565(232, 240, 255);
@@ -5755,9 +5887,54 @@ static esp_err_t draw_ota_confirm_screen(const struct tm *tm)
     const uint16_t accent = rgb565(255, 211, 85);
     const uint16_t border = rgb565(84, 116, 160);
     const uint16_t box = rgb565(8, 14, 32);
+    const uint16_t progress_track = rgb565(24, 36, 58);
+    const uint16_t progress_fill = rgb565(94, 236, 218);
     const uint16_t yes_bg = rgb565(255, 196, 76);
     const uint16_t no_bg = rgb565(36, 48, 78);
     const uint16_t dark = rgb565(15, 20, 30);
+    ota_info_t ota = {0};
+    char url[OTA_URL_LEN] = {0};
+    char source_buf[48];
+    char status_buf[48];
+    char size_buf[24];
+    char percent_buf[16];
+    const char *title = "OTA UPDATE";
+    const char *left_button = "START";
+    bool show_buttons = true;
+
+    ota_get_snapshot(&ota);
+    (void)ota_get_effective_url(url, sizeof(url));
+    ota_format_source_label(url, source_buf, sizeof(source_buf));
+    ota_format_size_label(&ota, size_buf, sizeof(size_buf));
+    strlcpy(status_buf, "READY", sizeof(status_buf));
+    percent_buf[0] = '\0';
+
+    if (ota.status == OTA_STATUS_RUNNING) {
+        title = "OTA DOWNLOAD";
+        show_buttons = false;
+        if (ota.progress_percent >= 0) {
+            snprintf(status_buf, sizeof(status_buf), "DOWNLOADING %d%%", ota.progress_percent);
+            snprintf(percent_buf, sizeof(percent_buf), "%d%%", ota.progress_percent);
+        } else {
+            strlcpy(status_buf, ota.message[0] != '\0' ? ota.message : "DOWNLOADING",
+                    sizeof(status_buf));
+            strlcpy(percent_buf, "--", sizeof(percent_buf));
+        }
+    } else if (ota.status == OTA_STATUS_SUCCESS) {
+        title = "OTA DONE";
+        show_buttons = false;
+        strlcpy(status_buf, "REBOOTING", sizeof(status_buf));
+        strlcpy(percent_buf, "100%", sizeof(percent_buf));
+    } else if (ota.status == OTA_STATUS_FAILED) {
+        title = "OTA FAILED";
+        left_button = "RETRY";
+        if (ota.last_error != ESP_OK) {
+            strlcpy(status_buf, esp_err_to_name(ota.last_error), sizeof(status_buf));
+        } else {
+            strlcpy(status_buf, ota.message[0] != '\0' ? ota.message : "FAILED",
+                    sizeof(status_buf));
+        }
+    }
 
     ESP_RETURN_ON_ERROR(draw_view_background(rgb565(5, 8, 22), rgb565(12, 18, 34)),
                         TAG, "draw ota confirm bg failed");
@@ -5770,26 +5947,55 @@ static esp_err_t draw_ota_confirm_screen(const struct tm *tm)
                                             OTA_CONFIRM_BOX_W - 4, OTA_CONFIRM_BOX_H - 4, 7, box),
                         TAG, "draw ota confirm box failed");
     ESP_RETURN_ON_ERROR(draw_text5_centered(160, OTA_CONFIRM_BOX_Y + 22,
-                                            "OTA UPDATE", 1, text),
+                                            title, 1, text),
                         TAG, "draw ota confirm title failed");
-    ESP_RETURN_ON_ERROR(draw_text5_centered(160, OTA_CONFIRM_BOX_Y + 43,
-                                            "HTTPS ONLY", 1, muted),
-                        TAG, "draw ota confirm body failed");
+    ESP_RETURN_ON_ERROR(draw_text5_limited(OTA_CONFIRM_BOX_X + 18, OTA_CONFIRM_BOX_Y + 43,
+                                           status_buf, 34, 1,
+                                           ota.status == OTA_STATUS_FAILED ? accent : muted),
+                        TAG, "draw ota status failed");
+    ESP_RETURN_ON_ERROR(draw_text5_limited(OTA_CONFIRM_BOX_X + 18, OTA_CONFIRM_BOX_Y + 61,
+                                           source_buf, 34, 1, muted),
+                        TAG, "draw ota source failed");
 
-    ESP_RETURN_ON_ERROR(lcd_fill_round_rect(OTA_CONFIRM_YES_X, OTA_CONFIRM_YES_Y,
-                                            OTA_CONFIRM_BUTTON_W, OTA_CONFIRM_BUTTON_H,
-                                            6, yes_bg),
-                        TAG, "draw ota yes button failed");
-    ESP_RETURN_ON_ERROR(lcd_fill_round_rect(OTA_CONFIRM_NO_X, OTA_CONFIRM_NO_Y,
-                                            OTA_CONFIRM_BUTTON_W, OTA_CONFIRM_BUTTON_H,
-                                            6, no_bg),
-                        TAG, "draw ota no button failed");
-    ESP_RETURN_ON_ERROR(draw_text5_centered(OTA_CONFIRM_YES_X + OTA_CONFIRM_BUTTON_W / 2,
-                                            OTA_CONFIRM_YES_Y + 8, "YES", 1, dark),
-                        TAG, "draw ota yes text failed");
-    ESP_RETURN_ON_ERROR(draw_text5_centered(OTA_CONFIRM_NO_X + OTA_CONFIRM_BUTTON_W / 2,
-                                            OTA_CONFIRM_NO_Y + 8, "NO", 1, accent),
-                        TAG, "draw ota no text failed");
+    if (ota.status == OTA_STATUS_RUNNING || ota.status == OTA_STATUS_SUCCESS) {
+        ESP_RETURN_ON_ERROR(draw_ota_progress_bar(OTA_CONFIRM_BOX_X + 18, OTA_CONFIRM_BOX_Y + 78,
+                                                  OTA_CONFIRM_BOX_W - 36, 12,
+                                                  ota.status == OTA_STATUS_SUCCESS ? 100 :
+                                                  ota.progress_percent,
+                                                  border, progress_track, progress_fill),
+                            TAG, "draw ota progress failed");
+        if (percent_buf[0] != '\0') {
+            ESP_RETURN_ON_ERROR(draw_text5(CLOCK_PANEL_X + CLOCK_PANEL_W -
+                                           text5_width(percent_buf, 1) - 54,
+                                           OTA_CONFIRM_BOX_Y + 96, percent_buf, 1,
+                                           progress_fill),
+                                TAG, "draw ota percent failed");
+        }
+        ESP_RETURN_ON_ERROR(draw_text5_limited(OTA_CONFIRM_BOX_X + 18, OTA_CONFIRM_BOX_Y + 96,
+                                               size_buf, 24, 1, text),
+                            TAG, "draw ota size failed");
+    } else {
+        ESP_RETURN_ON_ERROR(draw_text5_centered(160, OTA_CONFIRM_BOX_Y + 82,
+                                                "HTTPS ONLY", 1, muted),
+                            TAG, "draw ota confirm body failed");
+    }
+
+    if (show_buttons) {
+        ESP_RETURN_ON_ERROR(lcd_fill_round_rect(OTA_CONFIRM_YES_X, OTA_CONFIRM_YES_Y,
+                                                OTA_CONFIRM_BUTTON_W, OTA_CONFIRM_BUTTON_H,
+                                                6, yes_bg),
+                            TAG, "draw ota yes button failed");
+        ESP_RETURN_ON_ERROR(lcd_fill_round_rect(OTA_CONFIRM_NO_X, OTA_CONFIRM_NO_Y,
+                                                OTA_CONFIRM_BUTTON_W, OTA_CONFIRM_BUTTON_H,
+                                                6, no_bg),
+                            TAG, "draw ota no button failed");
+        ESP_RETURN_ON_ERROR(draw_text5_centered(OTA_CONFIRM_YES_X + OTA_CONFIRM_BUTTON_W / 2,
+                                                OTA_CONFIRM_YES_Y + 8, left_button, 1, dark),
+                            TAG, "draw ota yes text failed");
+        ESP_RETURN_ON_ERROR(draw_text5_centered(OTA_CONFIRM_NO_X + OTA_CONFIRM_BUTTON_W / 2,
+                                                OTA_CONFIRM_NO_Y + 8, "BACK", 1, accent),
+                            TAG, "draw ota no text failed");
+    }
     return lcd_canvas_flush();
 }
 
@@ -6894,10 +7100,14 @@ static bool touch_poll_view_change(app_view_t *view)
     bool redraw = false;
 
     if (*view == APP_VIEW_OTA_CONFIRM) {
-        if (point_in_rect(x, y, OTA_CONFIRM_YES_X, OTA_CONFIRM_YES_Y,
-                          OTA_CONFIRM_BUTTON_W, OTA_CONFIRM_BUTTON_H)) {
+        ota_info_t ota = {0};
+        ota_get_snapshot(&ota);
+        if (ota.status == OTA_STATUS_RUNNING || ota.status == OTA_STATUS_SUCCESS) {
+            redraw = true;
+        } else if (point_in_rect(x, y, OTA_CONFIRM_YES_X, OTA_CONFIRM_YES_Y,
+                                 OTA_CONFIRM_BUTTON_W, OTA_CONFIRM_BUTTON_H)) {
             (void)ota_start_update();
-            next_view = APP_VIEW_HEALTH;
+            redraw = true;
         } else if (point_in_rect(x, y, OTA_CONFIRM_NO_X, OTA_CONFIRM_NO_Y,
                                  OTA_CONFIRM_BUTTON_W, OTA_CONFIRM_BUTTON_H) ||
                    !point_in_rect(x, y, OTA_CONFIRM_BOX_X, OTA_CONFIRM_BOX_Y,
@@ -7128,6 +7338,11 @@ void app_main(void)
     BaseType_t network_ok = xTaskCreate(network_task, "network", 8192, NULL, 5, NULL);
     if (network_ok != pdPASS) {
         ESP_LOGE(TAG, "create network task failed");
+    }
+    BaseType_t serial_ok = xTaskCreate(serial_command_task, "serial_cmd",
+                                       SERIAL_COMMAND_TASK_STACK_SIZE, NULL, 2, NULL);
+    if (serial_ok != pdPASS) {
+        ESP_LOGE(TAG, "create serial command task failed");
     }
 
     int last_second = -1;

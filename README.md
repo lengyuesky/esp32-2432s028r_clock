@@ -119,13 +119,19 @@ ota_1: 0x1a0000 0x180000
 
 配网页面里的 OTA 地址可以覆盖默认地址；留空则继续使用 GitHub Releases 的默认地址。OTA 地址只支持 HTTPS。
 
+也可以在串口监视器里输入维护命令：
+
+- `ota`：启动 OTA 更新。
+- `status`：打印 Wi-Fi、OTA、进度和堆内存状态。
+
 ## GitHub Actions 构建
 
 仓库包含 `.github/workflows/build-ota.yml`，会使用 ESP-IDF v5.4.2 构建 OTA 镜像。
 
-- `push` 到 `main`、`pull_request` 和手动 `workflow_dispatch` 会构建固件，并把 `cyd_clock.bin`、`cyd_clock.bin.sha256`、`partition-table.bin`、`ota_data_initial.bin` 上传为 Actions artifact。
-- 发布 GitHub Release 时，会再次构建并把 `cyd_clock.bin` 和 `cyd_clock.bin.sha256` 上传到该 Release 的资产中。
-- 固件默认 OTA 地址使用 `releases/latest/download/cyd_clock.bin`，因此只有已经发布 Release 并存在 `cyd_clock.bin` 资产时，设备才能通过默认地址 OTA。
+- `push` 到 `main` 会构建固件，上传 Actions artifact，并更新 `ota-latest` 滚动 Release；该 Release 会被标记为 GitHub Latest。
+- `pull_request` 和手动 `workflow_dispatch` 会构建固件，并把 `cyd_clock.bin`、`cyd_clock.bin.sha256`、`partition-table.bin`、`ota_data_initial.bin` 上传为 Actions artifact。
+- 发布普通 GitHub Release 时，会再次构建并把 `cyd_clock.bin` 和 `cyd_clock.bin.sha256` 上传到该 Release 的资产中。
+- 固件默认 OTA 地址使用 `releases/latest/download/cyd_clock.bin`，因此 `main` 每次推送成功后，设备默认会拉取最新 Release 资产。
 
 当前 Release 页面：
 
@@ -234,9 +240,9 @@ ESP-IDF 已经会并行编译。WSL 下最大的影响通常是项目位于 Wind
 
 如果串口日志提示实际 Flash 大于镜像头中的大小，说明当前配置按 2MB 镜像头构建，但板子可能是 4MB Flash。现有默认分区足够当前固件使用；如需使用更多 Flash，可在 `menuconfig` 中调整 Flash size 和分区表。
 
-### Release 页面没有 OTA 镜像
+### Release 页面没有 OTA 镜像或不是最新
 
-`main` 分支 push 会构建镜像，但产物默认只在 Actions artifact 中。只有发布 GitHub Release 时，工作流才会把 `cyd_clock.bin` 上传到 Release 资产里。
+`main` 分支 push 会构建镜像并更新 `ota-latest` 滚动 Release。如果 Release 页面没有新镜像，先检查最近一次 `Build OTA firmware` 工作流是否成功。
 
 如果设备使用默认 OTA 地址，请确认最新 Release 中存在 `cyd_clock.bin`：
 
