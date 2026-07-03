@@ -387,6 +387,8 @@ static esp_netif_t *s_sta_netif;
 static esp_netif_t *s_ap_netif;
 static httpd_handle_t s_prov_httpd;
 static TaskHandle_t s_prov_dns_task;
+static TaskHandle_t s_weather_task;
+static TaskHandle_t s_komari_task;
 static char s_prov_ap_ssid[WIFI_SSID_LEN];
 static char s_connected_ssid[WIFI_SSID_LEN];
 static int s_wifi_retry_count;
@@ -405,6 +407,9 @@ static app_view_t s_current_view = APP_VIEW_DASHBOARD;
 static int s_today_hourly_page;
 static time_t s_boot_time;
 static esp_reset_reason_t s_last_reset_reason = ESP_RST_UNKNOWN;
+
+static void start_weather_task_once(void);
+static void start_komari_task_once(void);
 
 static const char s_captive_portal_uri[] = "http://" PROV_AP_IP_ADDR "/";
 
@@ -1800,6 +1805,43 @@ static void ota_mark_running_app_valid(void)
     }
 }
 
+static bool ota_stop_background_fetch_tasks(void)
+{
+    bool stopped = false;
+
+#if CONFIG_CLOCK_WEATHER_ENABLE
+    if (s_weather_task != NULL) {
+        TaskHandle_t task = s_weather_task;
+        s_weather_task = NULL;
+        s_weather_task_started = false;
+        vTaskDelete(task);
+        stopped = true;
+        ESP_LOGI(TAG, "weather task stopped for OTA");
+    }
+#endif
+
+    if (s_komari_task != NULL) {
+        TaskHandle_t task = s_komari_task;
+        s_komari_task = NULL;
+        s_komari_task_started = false;
+        vTaskDelete(task);
+        stopped = true;
+        ESP_LOGI(TAG, "Komari task stopped for OTA");
+    }
+
+    if (stopped) {
+        vTaskDelay(pdMS_TO_TICKS(100));
+        log_runtime_health("ota-prep");
+    }
+    return stopped;
+}
+
+static void ota_restart_background_fetch_tasks(void)
+{
+    start_weather_task_once();
+    start_komari_task_once();
+}
+
 static void ota_task(void *arg)
 {
     char url[OTA_URL_LEN] = {0};
@@ -1815,14 +1857,17 @@ static void ota_task(void *arg)
     esp_err_t ret = ESP_OK;
     esp_https_ota_handle_t ota_handle = NULL;
     bool lock_taken = false;
+    bool background_tasks_stopped = false;
     int last_read_len = 0;
     int last_image_size = 0;
     int last_progress = -1;
+    int last_logged_progress = -1;
     if (!network_fetch_lock_take("ota", pdMS_TO_TICKS(120000))) {
         ret = ESP_ERR_TIMEOUT;
         goto fail;
     }
     lock_taken = true;
+    background_tasks_stopped = ota_stop_background_fetch_tasks();
 
     bool use_github_ota_roots = strstr(url, "github.com/") != NULL ||
                                 strstr(url, "githubusercontent.com/") != NULL;
@@ -1866,6 +1911,11 @@ static void ota_task(void *arg)
         }
         last_progress = progress;
         ota_set_status(OTA_STATUS_RUNNING, progress, read_len, image_size, ESP_OK, "RUN");
+        if (progress >= 0 &&
+            (last_logged_progress < 0 || progress >= last_logged_progress + 10 || progress == 100)) {
+            ESP_LOGI(TAG, "OTA progress: %d%% (%d/%d bytes)", progress, read_len, image_size);
+            last_logged_progress = progress;
+        }
         if (ret != ESP_ERR_HTTPS_OTA_IN_PROGRESS) {
             break;
         }
@@ -1907,6 +1957,9 @@ fail:
     }
     ota_set_status(OTA_STATUS_FAILED, last_progress, last_read_len, last_image_size,
                    ret, esp_err_to_name(ret));
+    if (background_tasks_stopped) {
+        ota_restart_background_fetch_tasks();
+    }
     s_ota_task_running = false;
     vTaskDelete(NULL);
 }
@@ -6761,10 +6814,12 @@ static void start_weather_task_once(void)
         return;
     }
 
-    BaseType_t task_ok = xTaskCreate(weather_task, "weather", WEATHER_TASK_STACK_SIZE, NULL, 4, NULL);
+    BaseType_t task_ok = xTaskCreate(weather_task, "weather", WEATHER_TASK_STACK_SIZE, NULL, 4,
+                                     &s_weather_task);
     if (task_ok == pdPASS) {
         s_weather_task_started = true;
     } else {
+        s_weather_task = NULL;
         ESP_LOGE(TAG, "create weather task failed");
     }
 #endif
@@ -6776,10 +6831,12 @@ static void start_komari_task_once(void)
         return;
     }
 
-    BaseType_t task_ok = xTaskCreate(komari_task, "komari", KOMARI_TASK_STACK_SIZE, NULL, 4, NULL);
+    BaseType_t task_ok = xTaskCreate(komari_task, "komari", KOMARI_TASK_STACK_SIZE, NULL, 4,
+                                     &s_komari_task);
     if (task_ok == pdPASS) {
         s_komari_task_started = true;
     } else {
+        s_komari_task = NULL;
         ESP_LOGE(TAG, "create Komari task failed");
     }
 }
