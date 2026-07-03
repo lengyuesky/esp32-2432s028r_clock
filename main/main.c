@@ -242,6 +242,8 @@
 
 static const char *TAG = "cyd_clock";
 
+extern const uint8_t github_ota_roots_pem_start[] asm("_binary_github_ota_roots_pem_start");
+
 typedef enum {
     APP_VIEW_DASHBOARD = 0,
     APP_VIEW_TODAY_WEATHER,
@@ -1822,13 +1824,16 @@ static void ota_task(void *arg)
     }
     lock_taken = true;
 
+    bool use_github_ota_roots = strstr(url, "github.com/") != NULL ||
+                                strstr(url, "githubusercontent.com/") != NULL;
     esp_http_client_config_t http_config = {
         .url = url,
+        .cert_pem = use_github_ota_roots ? (const char *)github_ota_roots_pem_start : NULL,
         .timeout_ms = OTA_HTTP_TIMEOUT_MS,
         .buffer_size = OTA_HTTP_BUFFER_SIZE,
         .buffer_size_tx = OTA_HTTP_TX_BUFFER_SIZE,
         .keep_alive_enable = true,
-        .crt_bundle_attach = esp_crt_bundle_attach,
+        .crt_bundle_attach = use_github_ota_roots ? NULL : esp_crt_bundle_attach,
     };
     esp_https_ota_config_t ota_config = {
         .http_config = &http_config,
