@@ -6223,7 +6223,7 @@ static esp_err_t provisioning_root_handler(httpd_req_t *req)
         "placeholder='https://komari.example.com'>"
         "<p class='hint'>填写后首页会显示 Komari 在线状态栏，留空则关闭。</p>"
         "<label>OTA 地址（可选）</label><input name='ota_url' maxlength='255' autocomplete='off' "
-        "placeholder='https://github.com/lengyuesky/esp32-2432s028r_clock/releases/latest/download/cyd_clock.bin'>"
+        "placeholder='https://github.com/lengyuesky/esp32-2432s028r_clock/releases/download/ota-latest/cyd_clock.bin'>"
         "<p class='hint'>留空使用默认 GitHub Releases HTTPS OTA 地址，仅支持 HTTPS。</p>"
         "<button type='submit'>保存并连接</button></form>"
         "<p class='hint'>如果手机没有自动弹出页面，请在浏览器打开 192.168.4.1。</p>"

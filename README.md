@@ -107,7 +107,7 @@ idf.py -p COM3 flash monitor
 固件支持 HTTPS OTA。默认 OTA 地址为：
 
 ```text
-https://github.com/lengyuesky/esp32-2432s028r_clock/releases/latest/download/cyd_clock.bin
+https://github.com/lengyuesky/esp32-2432s028r_clock/releases/download/ota-latest/cyd_clock.bin
 ```
 
 进入健康状态页后点击 `UPDATE`，确认后设备会从当前 OTA 地址下载 `cyd_clock.bin`，写入备用 OTA 分区并重启。默认分区表包含两个 0x180000 大小的 OTA 应用分区：
@@ -131,7 +131,7 @@ ota_1: 0x1a0000 0x180000
 - `push` 到 `main` 会构建固件，上传 Actions artifact，并更新 `ota-latest` 滚动 Release；该 Release 会被标记为 GitHub Latest。
 - `pull_request` 和手动 `workflow_dispatch` 会构建固件，并把 `cyd_clock.bin`、`cyd_clock.bin.sha256`、`partition-table.bin`、`ota_data_initial.bin` 上传为 Actions artifact。
 - 发布普通 GitHub Release 时，会再次构建并把 `cyd_clock.bin` 和 `cyd_clock.bin.sha256` 上传到该 Release 的资产中。
-- 固件默认 OTA 地址使用 `releases/latest/download/cyd_clock.bin`，因此 `main` 每次推送成功后，设备默认会拉取最新 Release 资产。
+- 固件默认 OTA 地址使用 `releases/download/ota-latest/cyd_clock.bin`，因此 `main` 每次推送成功后，设备默认会拉取滚动 Release 的最新资产。
 
 当前 Release 页面：
 
@@ -247,5 +247,5 @@ ESP-IDF 已经会并行编译。WSL 下最大的影响通常是项目位于 Wind
 如果设备使用默认 OTA 地址，请确认最新 Release 中存在 `cyd_clock.bin`：
 
 ```text
-https://github.com/lengyuesky/esp32-2432s028r_clock/releases/latest/download/cyd_clock.bin
+https://github.com/lengyuesky/esp32-2432s028r_clock/releases/download/ota-latest/cyd_clock.bin
 ```
