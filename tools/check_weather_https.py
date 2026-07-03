@@ -13,7 +13,10 @@ SDKCONFIG = PROJECT_ROOT / "sdkconfig"
 
 
 def extract_function(source: str, name: str) -> str:
-    match = re.search(rf"static\s+[^\n]+?\s+{re.escape(name)}\s*\([^)]*\)\s*\{{", source)
+    match = re.search(
+        rf"(?m)^(?:static[ \t]+)?[A-Za-z_][A-Za-z0-9_ \t\*]*[ \t]+\*?{re.escape(name)}[ \t]*\([^{{}};]*\)[ \t\r\n]*\{{",
+        source,
+    )
     if match is None:
         raise AssertionError(f"未找到函数 {name}")
 
@@ -109,9 +112,14 @@ def main() -> int:
         "CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y" in defaults_source,
         "sdkconfig.defaults 需要匹配实测 4MB flash，避免继续按 2MB 构建。",
     )
+    large_single_partition = "CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y" in defaults_source
+    ota_partition = (
+        "CONFIG_PARTITION_TABLE_CUSTOM=y" in defaults_source
+        and 'CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"' in defaults_source
+    )
     require(
-        "CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y" in defaults_source,
-        "sdkconfig.defaults 需要使用大单 app 分区，为完整 HTTPS 证书包保留余量。",
+        large_single_partition or ota_partition,
+        "sdkconfig.defaults 需要使用大单 app 分区或自定义 OTA 分区，为完整 HTTPS 证书包保留余量。",
     )
 
     require(

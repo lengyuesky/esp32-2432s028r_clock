@@ -12,12 +12,14 @@
 
 #include "driver/gpio.h"
 #include "driver/spi_master.h"
+#include "esp_app_desc.h"
 #include "esp_check.h"
 #include "esp_crt_bundle.h"
 #include "esp_err.h"
 #include "esp_event.h"
 #include "esp_http_client.h"
 #include "esp_http_server.h"
+#include "esp_https_ota.h"
 #include "esp_heap_caps.h"
 #include "esp_lcd_panel_ili9341.h"
 #include "esp_lcd_panel_io.h"
@@ -26,6 +28,8 @@
 #include "esp_mac.h"
 #include "esp_netif.h"
 #include "esp_netif_sntp.h"
+#include "esp_ota_ops.h"
+#include "esp_partition.h"
 #include "esp_system.h"
 #include "esp_tls_crypto.h"
 #include "esp_transport.h"
@@ -62,7 +66,7 @@
 #define PROV_HTTP_PORT 80
 #define PROV_DNS_PORT 53
 #define PROV_DNS_TASK_STACK_SIZE 4096
-#define PROV_FORM_MAX_LEN 1024
+#define PROV_FORM_MAX_LEN 1536
 #define WEATHER_HTTP_BUFFER_SIZE 4096
 #define WEATHER_TEXT_HTTP_BUFFER_SIZE 512
 #define WEATHER_FORECAST_HTTP_BUFFER_SIZE 2048
@@ -89,6 +93,12 @@
 #define KOMARI_WS_BUFFER_SIZE 4096
 #define KOMARI_TASK_STACK_SIZE 12288
 #define KOMARI_REFRESH_MS 60000
+#define OTA_URL_LEN 256
+#define OTA_TASK_STACK_SIZE 12288
+#define OTA_HTTP_TIMEOUT_MS 15000
+#define OTA_HTTP_REQUEST_SIZE 4096
+#define OTA_HTTP_BUFFER_SIZE 2048
+#define OTA_HTTP_TX_BUFFER_SIZE 1024
 #define CLOCK_SNTP_SYNC_TIMEOUT_MS 30000
 #define TOUCH_SAMPLE_COUNT 5
 #define TOUCH_DEBOUNCE_TICKS pdMS_TO_TICKS(220)
@@ -104,6 +114,10 @@
 #define DASHBOARD_WEATHER_HIT_Y (CLOCK_PANEL_Y + 7)
 #define DASHBOARD_WEATHER_HIT_W 72
 #define DASHBOARD_WEATHER_HIT_H 47
+#define HEALTH_STATUS_HIT_X (CLOCK_PANEL_X + 170)
+#define HEALTH_STATUS_HIT_Y (CLOCK_PANEL_Y + 112)
+#define HEALTH_STATUS_HIT_W 124
+#define HEALTH_STATUS_HIT_H 42
 #define WIFI_STATUS_HIT_X (CLOCK_PANEL_X + 8)
 #define WIFI_STATUS_HIT_Y (CLOCK_PANEL_Y + 5)
 #define WIFI_STATUS_HIT_W 134
@@ -118,6 +132,20 @@
 #define WIFI_CONFIRM_BUTTON_H 26
 #define WIFI_CONFIRM_NO_X (WIFI_CONFIRM_BOX_X + WIFI_CONFIRM_BOX_W - WIFI_CONFIRM_BUTTON_W - 22)
 #define WIFI_CONFIRM_NO_Y WIFI_CONFIRM_YES_Y
+#define HEALTH_OTA_HIT_X (CLOCK_PANEL_X + CLOCK_PANEL_W - 82)
+#define HEALTH_OTA_HIT_Y (CLOCK_PANEL_Y + CLOCK_PANEL_H - 31)
+#define HEALTH_OTA_HIT_W 68
+#define HEALTH_OTA_HIT_H 24
+#define OTA_CONFIRM_BOX_X (CLOCK_PANEL_X + 36)
+#define OTA_CONFIRM_BOX_Y (CLOCK_PANEL_Y + 66)
+#define OTA_CONFIRM_BOX_W (CLOCK_PANEL_W - 72)
+#define OTA_CONFIRM_BOX_H 112
+#define OTA_CONFIRM_YES_X (OTA_CONFIRM_BOX_X + 24)
+#define OTA_CONFIRM_YES_Y (OTA_CONFIRM_BOX_Y + 74)
+#define OTA_CONFIRM_BUTTON_W 76
+#define OTA_CONFIRM_BUTTON_H 26
+#define OTA_CONFIRM_NO_X (OTA_CONFIRM_BOX_X + OTA_CONFIRM_BOX_W - OTA_CONFIRM_BUTTON_W - 24)
+#define OTA_CONFIRM_NO_Y OTA_CONFIRM_YES_Y
 
 #ifndef CONFIG_CLOCK_PROV_ENABLE
 #define CONFIG_CLOCK_PROV_ENABLE 0
@@ -217,11 +245,20 @@ typedef enum {
     APP_VIEW_DASHBOARD = 0,
     APP_VIEW_TODAY_WEATHER,
     APP_VIEW_WIFI_CONFIRM,
+    APP_VIEW_OTA_CONFIRM,
     APP_VIEW_ANALOG_CLOCK,
     APP_VIEW_CALENDAR,
     APP_VIEW_WEATHER,
     APP_VIEW_KOMARI,
+    APP_VIEW_HEALTH,
 } app_view_t;
+
+typedef enum {
+    OTA_STATUS_IDLE = 0,
+    OTA_STATUS_RUNNING,
+    OTA_STATUS_SUCCESS,
+    OTA_STATUS_FAILED,
+} ota_status_t;
 
 typedef struct {
     esp_lcd_panel_handle_t panel;
@@ -314,6 +351,17 @@ typedef struct {
 } komari_url_parts_t;
 
 typedef struct {
+    ota_status_t status;
+    int progress_percent;
+    int image_size;
+    int image_read;
+    esp_err_t last_error;
+    time_t updated_at;
+    char message[64];
+    char override_url[OTA_URL_LEN];
+} ota_info_t;
+
+typedef struct {
     spi_device_handle_t spi;
     bool initialized;
     bool was_pressed;
@@ -325,10 +373,13 @@ static touch_context_t s_touch;
 static EventGroupHandle_t s_wifi_event_group;
 static SemaphoreHandle_t s_weather_lock;
 static SemaphoreHandle_t s_komari_lock;
+static SemaphoreHandle_t s_ota_lock;
 static SemaphoreHandle_t s_network_fetch_lock;
 static weather_info_t s_weather;
 static komari_info_t s_komari;
+static ota_info_t s_ota;
 static char s_komari_base_url[KOMARI_URL_LEN];
+static char s_ota_override_url[OTA_URL_LEN];
 static esp_netif_t *s_sta_netif;
 static esp_netif_t *s_ap_netif;
 static httpd_handle_t s_prov_httpd;
@@ -346,8 +397,11 @@ static volatile bool s_prov_active;
 static volatile bool s_prov_dns_running;
 static volatile bool s_time_synced;
 static volatile bool s_wifi_force_prov_pending;
+static volatile bool s_ota_task_running;
 static app_view_t s_current_view = APP_VIEW_DASHBOARD;
 static int s_today_hourly_page;
+static time_t s_boot_time;
+static esp_reset_reason_t s_last_reset_reason = ESP_RST_UNKNOWN;
 
 static const char s_captive_portal_uri[] = "http://" PROV_AP_IP_ADDR "/";
 
@@ -1543,6 +1597,338 @@ static bool komari_normalize_url(const char *input, char *output, size_t output_
         return false;
     }
     return strlcpy(output, normalized, output_len) < output_len;
+}
+
+static const char *ota_status_text(ota_status_t status)
+{
+    switch (status) {
+    case OTA_STATUS_RUNNING:
+        return "RUN";
+    case OTA_STATUS_SUCCESS:
+        return "OK";
+    case OTA_STATUS_FAILED:
+        return "ERR";
+    case OTA_STATUS_IDLE:
+    default:
+        return "IDLE";
+    }
+}
+
+static bool ota_normalize_url(const char *input, char *output, size_t output_len)
+{
+    if (output == NULL || output_len == 0) {
+        return false;
+    }
+    output[0] = '\0';
+    if (input == NULL) {
+        return true;
+    }
+
+    char scratch[OTA_URL_LEN] = {0};
+    if (strlcpy(scratch, input, sizeof(scratch)) >= sizeof(scratch)) {
+        return false;
+    }
+    char *trimmed = trim_ascii(scratch);
+    if (trimmed[0] == '\0') {
+        return true;
+    }
+    for (const char *p = trimmed; *p != '\0'; ++p) {
+        if (isspace((unsigned char)*p)) {
+            return false;
+        }
+    }
+
+    char normalized[OTA_URL_LEN] = {0};
+    int written = 0;
+    if (ascii_starts_with_ignore_case(trimmed, "https://")) {
+        written = snprintf(normalized, sizeof(normalized), "https://%s", trimmed + 8);
+    } else if (strstr(trimmed, "://") == NULL) {
+        written = snprintf(normalized, sizeof(normalized), "https://%s", trimmed);
+    } else {
+        return false;
+    }
+    if (written <= 0 || (size_t)written >= sizeof(normalized)) {
+        return false;
+    }
+    return strlcpy(output, normalized, output_len) < output_len;
+}
+
+static void ota_set_status(ota_status_t status, int progress_percent, int image_read,
+                           int image_size, esp_err_t last_error, const char *message)
+{
+    if (s_ota_lock != NULL && xSemaphoreTake(s_ota_lock, pdMS_TO_TICKS(1000)) == pdTRUE) {
+        s_ota.status = status;
+        s_ota.progress_percent = progress_percent;
+        s_ota.image_read = image_read;
+        s_ota.image_size = image_size;
+        s_ota.last_error = last_error;
+        s_ota.updated_at = time(NULL);
+        strlcpy(s_ota.message, message != NULL ? message : ota_status_text(status),
+                sizeof(s_ota.message));
+        xSemaphoreGive(s_ota_lock);
+    }
+}
+
+static esp_err_t ota_state_init(void)
+{
+    s_ota_lock = xSemaphoreCreateMutex();
+    ESP_RETURN_ON_FALSE(s_ota_lock != NULL, ESP_ERR_NO_MEM, TAG, "create OTA lock failed");
+    memset(&s_ota, 0, sizeof(s_ota));
+    s_ota.status = OTA_STATUS_IDLE;
+    s_ota.progress_percent = -1;
+    strlcpy(s_ota.message, "IDLE", sizeof(s_ota.message));
+    s_ota_override_url[0] = '\0';
+    return ESP_OK;
+}
+
+static void ota_get_snapshot(ota_info_t *out)
+{
+    if (out == NULL) {
+        return;
+    }
+    if (s_ota_lock != NULL && xSemaphoreTake(s_ota_lock, pdMS_TO_TICKS(10)) == pdTRUE) {
+        *out = s_ota;
+        xSemaphoreGive(s_ota_lock);
+        return;
+    }
+    *out = s_ota;
+}
+
+static bool ota_get_effective_url(char *out, size_t out_len)
+{
+    if (out == NULL || out_len == 0) {
+        return false;
+    }
+
+    if (s_ota_lock != NULL && xSemaphoreTake(s_ota_lock, pdMS_TO_TICKS(100)) == pdTRUE) {
+        if (s_ota_override_url[0] != '\0') {
+            strlcpy(out, s_ota_override_url, out_len);
+        } else {
+            strlcpy(out, CONFIG_CLOCK_OTA_DEFAULT_URL, out_len);
+        }
+        xSemaphoreGive(s_ota_lock);
+    } else {
+        strlcpy(out, s_ota_override_url[0] != '\0' ?
+                s_ota_override_url : CONFIG_CLOCK_OTA_DEFAULT_URL, out_len);
+    }
+    return out[0] != '\0';
+}
+
+static void ota_apply_override_url(const char *url)
+{
+    if (s_ota_lock != NULL && xSemaphoreTake(s_ota_lock, pdMS_TO_TICKS(1000)) == pdTRUE) {
+        strlcpy(s_ota_override_url, url != NULL ? url : "", sizeof(s_ota_override_url));
+        strlcpy(s_ota.override_url, s_ota_override_url, sizeof(s_ota.override_url));
+        xSemaphoreGive(s_ota_lock);
+        return;
+    }
+    strlcpy(s_ota_override_url, url != NULL ? url : "", sizeof(s_ota_override_url));
+    strlcpy(s_ota.override_url, s_ota_override_url, sizeof(s_ota.override_url));
+}
+
+static esp_err_t ota_config_load(void)
+{
+    char stored[OTA_URL_LEN] = {0};
+    nvs_handle_t nvs = 0;
+    esp_err_t ret = nvs_open("ota_cfg", NVS_READONLY, &nvs);
+    if (ret == ESP_ERR_NVS_NOT_FOUND) {
+        ota_apply_override_url("");
+        ESP_LOGI(TAG, "OTA URL override is not configured");
+        return ESP_OK;
+    }
+    ESP_RETURN_ON_ERROR(ret, TAG, "open OTA NVS failed");
+
+    size_t len = sizeof(stored);
+    ret = nvs_get_str(nvs, "url", stored, &len);
+    nvs_close(nvs);
+    if (ret == ESP_ERR_NVS_NOT_FOUND) {
+        ota_apply_override_url("");
+        ESP_LOGI(TAG, "OTA URL override is not configured");
+        return ESP_OK;
+    }
+    ESP_RETURN_ON_ERROR(ret, TAG, "read OTA URL failed");
+
+    char normalized[OTA_URL_LEN] = {0};
+    if (!ota_normalize_url(stored, normalized, sizeof(normalized))) {
+        ESP_LOGW(TAG, "ignore invalid saved OTA URL");
+        ota_apply_override_url("");
+        return ESP_OK;
+    }
+    ota_apply_override_url(normalized);
+    ESP_LOGI(TAG, "OTA URL override loaded: %s",
+             normalized[0] != '\0' ? normalized : "default");
+    return ESP_OK;
+}
+
+static esp_err_t ota_config_save(const char *url)
+{
+    char normalized[OTA_URL_LEN] = {0};
+    ESP_RETURN_ON_FALSE(ota_normalize_url(url, normalized, sizeof(normalized)),
+                        ESP_ERR_INVALID_ARG, TAG, "invalid OTA URL");
+
+    nvs_handle_t nvs = 0;
+    ESP_RETURN_ON_ERROR(nvs_open("ota_cfg", NVS_READWRITE, &nvs), TAG, "open OTA NVS failed");
+    esp_err_t ret = nvs_set_str(nvs, "url", normalized);
+    if (ret == ESP_OK) {
+        ret = nvs_commit(nvs);
+    }
+    nvs_close(nvs);
+    ESP_RETURN_ON_ERROR(ret, TAG, "save OTA URL failed");
+
+    ota_apply_override_url(normalized);
+    ESP_LOGI(TAG, "saved OTA URL override: %s",
+             normalized[0] != '\0' ? normalized : "default");
+    return ESP_OK;
+}
+
+static void ota_mark_running_app_valid(void)
+{
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    esp_ota_img_states_t state = ESP_OTA_IMG_UNDEFINED;
+    if (running != NULL &&
+        esp_ota_get_state_partition(running, &state) == ESP_OK &&
+        state == ESP_OTA_IMG_PENDING_VERIFY) {
+        esp_err_t ret = esp_ota_mark_app_valid_cancel_rollback();
+        if (ret == ESP_OK) {
+            ESP_LOGI(TAG, "OTA image marked valid");
+        } else {
+            ESP_LOGW(TAG, "mark OTA image valid failed: %s", esp_err_to_name(ret));
+        }
+    }
+}
+
+static void ota_task(void *arg)
+{
+    char url[OTA_URL_LEN] = {0};
+    if (arg != NULL) {
+        strlcpy(url, (const char *)arg, sizeof(url));
+        free(arg);
+    }
+    if (url[0] == '\0') {
+        (void)ota_get_effective_url(url, sizeof(url));
+    }
+
+    ota_set_status(OTA_STATUS_RUNNING, 0, 0, 0, ESP_OK, "START");
+    esp_err_t ret = ESP_OK;
+    esp_https_ota_handle_t ota_handle = NULL;
+    bool lock_taken = false;
+    if (!network_fetch_lock_take("ota", pdMS_TO_TICKS(120000))) {
+        ret = ESP_ERR_TIMEOUT;
+        goto fail;
+    }
+    lock_taken = true;
+
+    esp_http_client_config_t http_config = {
+        .url = url,
+        .timeout_ms = OTA_HTTP_TIMEOUT_MS,
+        .buffer_size = OTA_HTTP_BUFFER_SIZE,
+        .buffer_size_tx = OTA_HTTP_TX_BUFFER_SIZE,
+        .keep_alive_enable = true,
+        .crt_bundle_attach = esp_crt_bundle_attach,
+    };
+    esp_https_ota_config_t ota_config = {
+        .http_config = &http_config,
+        .bulk_flash_erase = false,
+        .partial_http_download = true,
+        .max_http_request_size = OTA_HTTP_REQUEST_SIZE,
+    };
+
+    ESP_LOGI(TAG, "OTA start: %s", url);
+    ret = esp_https_ota_begin(&ota_config, &ota_handle);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "OTA begin failed: %s", esp_err_to_name(ret));
+        goto fail;
+    }
+
+    while (true) {
+        ret = esp_https_ota_perform(ota_handle);
+        int read_len = esp_https_ota_get_image_len_read(ota_handle);
+        int image_size = esp_https_ota_get_image_size(ota_handle);
+        int progress = image_size > 0 ? (read_len * 100) / image_size : -1;
+        ota_set_status(OTA_STATUS_RUNNING, progress, read_len, image_size, ESP_OK, "RUN");
+        if (ret != ESP_ERR_HTTPS_OTA_IN_PROGRESS) {
+            break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "OTA perform failed: %s", esp_err_to_name(ret));
+        goto fail;
+    }
+    if (!esp_https_ota_is_complete_data_received(ota_handle)) {
+        ret = ESP_ERR_INVALID_SIZE;
+        ESP_LOGW(TAG, "OTA image incomplete");
+        goto fail;
+    }
+
+    ret = esp_https_ota_finish(ota_handle);
+    ota_handle = NULL;
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "OTA finish failed: %s", esp_err_to_name(ret));
+        goto fail;
+    }
+
+    ota_set_status(OTA_STATUS_SUCCESS, 100, 0, 0, ESP_OK, "REBOOT");
+    ESP_LOGI(TAG, "OTA complete, restarting");
+    if (lock_taken) {
+        network_fetch_lock_give();
+        lock_taken = false;
+    }
+    vTaskDelay(pdMS_TO_TICKS(1000));
+    esp_restart();
+
+fail:
+    if (ota_handle != NULL) {
+        esp_https_ota_abort(ota_handle);
+    }
+    if (lock_taken) {
+        network_fetch_lock_give();
+    }
+    ota_set_status(OTA_STATUS_FAILED, -1, 0, 0, ret, esp_err_to_name(ret));
+    s_ota_task_running = false;
+    vTaskDelete(NULL);
+}
+
+static esp_err_t ota_start_update(void)
+{
+    if (!s_wifi_connected) {
+        ota_set_status(OTA_STATUS_FAILED, -1, 0, 0, ESP_ERR_INVALID_STATE, "NO WIFI");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (s_ota_lock != NULL && xSemaphoreTake(s_ota_lock, pdMS_TO_TICKS(1000)) == pdTRUE) {
+        if (s_ota_task_running || s_ota.status == OTA_STATUS_RUNNING) {
+            xSemaphoreGive(s_ota_lock);
+            return ESP_ERR_INVALID_STATE;
+        }
+        s_ota_task_running = true;
+        xSemaphoreGive(s_ota_lock);
+    } else if (s_ota_task_running) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    char *url = heap_caps_calloc(1, OTA_URL_LEN, MALLOC_CAP_8BIT);
+    if (url == NULL) {
+        s_ota_task_running = false;
+        ota_set_status(OTA_STATUS_FAILED, -1, 0, 0, ESP_ERR_NO_MEM, "NO MEM");
+        return ESP_ERR_NO_MEM;
+    }
+    if (!ota_get_effective_url(url, OTA_URL_LEN)) {
+        free(url);
+        s_ota_task_running = false;
+        ota_set_status(OTA_STATUS_FAILED, -1, 0, 0, ESP_ERR_INVALID_ARG, "NO URL");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    BaseType_t task_ok = xTaskCreate(ota_task, "ota", OTA_TASK_STACK_SIZE, url, 4, NULL);
+    if (task_ok != pdPASS) {
+        free(url);
+        s_ota_task_running = false;
+        ota_set_status(OTA_STATUS_FAILED, -1, 0, 0, ESP_ERR_NO_MEM, "TASK");
+        return ESP_ERR_NO_MEM;
+    }
+    return ESP_OK;
 }
 
 static void komari_reset_info_locked(const char *base_url)
@@ -5157,6 +5543,256 @@ static esp_err_t draw_wifi_reprovision_confirm_screen(const struct tm *tm)
     return lcd_canvas_flush();
 }
 
+static void format_uptime(char *out, size_t out_len)
+{
+    if (out == NULL || out_len == 0) {
+        return;
+    }
+
+    time_t now = time(NULL);
+    long seconds = 0;
+    if (s_boot_time > 0 && now >= s_boot_time) {
+        seconds = (long)difftime(now, s_boot_time);
+    }
+
+    long days = seconds / 86400;
+    long hours = (seconds % 86400) / 3600;
+    long minutes = (seconds % 3600) / 60;
+    long secs = seconds % 60;
+    if (days > 0) {
+        snprintf(out, out_len, "%ldD %02ld:%02ld", days, hours, minutes);
+    } else {
+        snprintf(out, out_len, "%02ld:%02ld:%02ld", hours, minutes, secs);
+    }
+}
+
+static void format_time_age(time_t timestamp, char *out, size_t out_len)
+{
+    if (out == NULL || out_len == 0) {
+        return;
+    }
+    if (timestamp <= 0) {
+        strlcpy(out, "--", out_len);
+        return;
+    }
+
+    time_t now = time(NULL);
+    long seconds = now >= timestamp ? (long)difftime(now, timestamp) : 0;
+    if (seconds < 60) {
+        snprintf(out, out_len, "%ldS AGO", seconds);
+    } else if (seconds < 3600) {
+        snprintf(out, out_len, "%ldM AGO", seconds / 60);
+    } else if (seconds < 86400) {
+        snprintf(out, out_len, "%ldH AGO", seconds / 3600);
+    } else {
+        snprintf(out, out_len, "%ldD AGO", seconds / 86400);
+    }
+}
+
+static void format_partition_label(const esp_partition_t *partition, char *out, size_t out_len)
+{
+    if (out == NULL || out_len == 0) {
+        return;
+    }
+    if (partition == NULL) {
+        strlcpy(out, "--", out_len);
+        return;
+    }
+
+    size_t out_pos = 0;
+    for (size_t i = 0; partition->label[i] != '\0' && out_pos + 1 < out_len; ++i) {
+        char ch = partition->label[i];
+        out[out_pos++] = ch == '_' ? '-' : (char)toupper((unsigned char)ch);
+    }
+    out[out_pos] = '\0';
+}
+
+static esp_err_t draw_health_row(int y, const char *label, const char *value,
+                                 uint16_t label_color, uint16_t value_color)
+{
+    const uint16_t line = rgb565(28, 42, 67);
+    const int label_x = CLOCK_PANEL_X + 16;
+    const int value_x = CLOCK_PANEL_X + 76;
+
+    ESP_RETURN_ON_ERROR(draw_text5(label_x, y, label, 1, label_color),
+                        TAG, "draw health label failed");
+    ESP_RETURN_ON_ERROR(draw_text5_limited(value_x, y, value != NULL ? value : "--",
+                                           30, 1, value_color),
+                        TAG, "draw health value failed");
+    return lcd_draw_hline(label_x, y + 9, CLOCK_PANEL_W - 32, line);
+}
+
+static esp_err_t draw_health_screen(const struct tm *tm)
+{
+    (void)tm;
+    const uint16_t text = rgb565(230, 241, 255);
+    const uint16_t muted = rgb565(135, 153, 188);
+    const uint16_t accent = rgb565(94, 236, 218);
+    const uint16_t warning = rgb565(255, 211, 85);
+    const uint16_t button_bg = rgb565(255, 196, 76);
+    const uint16_t button_text = rgb565(15, 20, 30);
+    const int row_y0 = CLOCK_PANEL_Y + 48;
+    const int row_h = 11;
+    char uptime_buf[24];
+    char ip_buf[24];
+    char rssi_buf[24];
+    char heap_buf[24];
+    char heap_min_buf[28];
+    char reset_buf[24];
+    char running_buf[24];
+    char next_buf[24];
+    char weather_buf[24];
+    char komari_buf[24];
+    char version_buf[32];
+    char ota_buf[32];
+    weather_info_t weather = {0};
+    komari_info_t komari = {0};
+    ota_info_t ota = {0};
+    esp_netif_ip_info_t ip_info = {0};
+    wifi_ap_record_t ap_info = {0};
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    const esp_partition_t *next = esp_ota_get_next_update_partition(NULL);
+    const esp_app_desc_t *app_desc = esp_app_get_description();
+    size_t heap_free = heap_caps_get_free_size(MALLOC_CAP_8BIT);
+    size_t heap_min = heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT);
+    size_t heap_largest = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+
+    format_uptime(uptime_buf, sizeof(uptime_buf));
+    strlcpy(ip_buf, "--", sizeof(ip_buf));
+    if (s_wifi_connected && s_sta_netif != NULL &&
+        esp_netif_get_ip_info(s_sta_netif, &ip_info) == ESP_OK &&
+        ip_info.ip.addr != 0) {
+        snprintf(ip_buf, sizeof(ip_buf), IPSTR, IP2STR(&ip_info.ip));
+    }
+    if (s_wifi_connected && esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK) {
+        snprintf(rssi_buf, sizeof(rssi_buf), "%dDBM CH%d", ap_info.rssi, ap_info.primary);
+    } else {
+        strlcpy(rssi_buf, "--", sizeof(rssi_buf));
+    }
+    snprintf(heap_buf, sizeof(heap_buf), "%uK", (unsigned)(heap_free / 1024));
+    snprintf(heap_min_buf, sizeof(heap_min_buf), "%uK/%uK",
+             (unsigned)(heap_min / 1024), (unsigned)(heap_largest / 1024));
+    strlcpy(reset_buf, reset_reason_name(s_last_reset_reason), sizeof(reset_buf));
+    format_partition_label(running, running_buf, sizeof(running_buf));
+    format_partition_label(next, next_buf, sizeof(next_buf));
+
+    weather_get_snapshot(&weather);
+    format_time_age(weather.updated_at, weather_buf, sizeof(weather_buf));
+    komari_get_snapshot(&komari);
+    if (!komari.configured) {
+        strlcpy(komari_buf, "OFF", sizeof(komari_buf));
+    } else {
+        format_time_age(komari.updated_at, komari_buf, sizeof(komari_buf));
+    }
+    strlcpy(version_buf, app_desc != NULL ? app_desc->version : "--", sizeof(version_buf));
+    ota_get_snapshot(&ota);
+    if (ota.status == OTA_STATUS_RUNNING && ota.progress_percent >= 0) {
+        snprintf(ota_buf, sizeof(ota_buf), "%s %d%%", ota_status_text(ota.status),
+                 ota.progress_percent);
+    } else if (ota.status == OTA_STATUS_FAILED && ota.last_error != ESP_OK) {
+        snprintf(ota_buf, sizeof(ota_buf), "%s %s", ota_status_text(ota.status),
+                 esp_err_to_name(ota.last_error));
+    } else {
+        strlcpy(ota_buf, ota.message[0] != '\0' ? ota.message : ota_status_text(ota.status),
+                sizeof(ota_buf));
+    }
+
+    ESP_RETURN_ON_ERROR(draw_view_background(rgb565(5, 9, 23), rgb565(9, 20, 33)),
+                        TAG, "draw health bg failed");
+    ESP_RETURN_ON_ERROR(draw_view_header("健康", tm), TAG, "draw health header failed");
+    ESP_RETURN_ON_ERROR(lcd_fill_vertical_blend_rect(CLOCK_PANEL_X + 1, CLOCK_PANEL_Y + 42,
+                                                     CLOCK_PANEL_W - 2, 22,
+                                                     rgb565(10, 31, 48), rgb565(8, 20, 36)),
+                        TAG, "draw health band failed");
+    ESP_RETURN_ON_ERROR(draw_text5(CLOCK_PANEL_X + 18, CLOCK_PANEL_Y + 49,
+                                   "HEALTH", 1, accent),
+                        TAG, "draw health title failed");
+    ESP_RETURN_ON_ERROR(draw_text5(CLOCK_PANEL_X + CLOCK_PANEL_W - text5_width("OTA", 1) - 18,
+                                   CLOCK_PANEL_Y + 49, "OTA", 1,
+                                   ota.status == OTA_STATUS_FAILED ? warning : accent),
+                        TAG, "draw health ota mark failed");
+
+    ESP_RETURN_ON_ERROR(draw_health_row(row_y0 + row_h * 0, "UPTIME", uptime_buf, accent, text),
+                        TAG, "draw uptime failed");
+    ESP_RETURN_ON_ERROR(draw_health_row(row_y0 + row_h * 1, "IP", ip_buf, muted, text),
+                        TAG, "draw ip failed");
+    ESP_RETURN_ON_ERROR(draw_health_row(row_y0 + row_h * 2, "RSSI", rssi_buf, muted, text),
+                        TAG, "draw rssi failed");
+    ESP_RETURN_ON_ERROR(draw_health_row(row_y0 + row_h * 3, "HEAP", heap_buf, muted, text),
+                        TAG, "draw heap failed");
+    ESP_RETURN_ON_ERROR(draw_health_row(row_y0 + row_h * 4, "MIN", heap_min_buf, muted, text),
+                        TAG, "draw heap min failed");
+    ESP_RETURN_ON_ERROR(draw_health_row(row_y0 + row_h * 5, "RESET", reset_buf, muted, text),
+                        TAG, "draw reset failed");
+    ESP_RETURN_ON_ERROR(draw_health_row(row_y0 + row_h * 6, "RUN", running_buf, muted, text),
+                        TAG, "draw run failed");
+    ESP_RETURN_ON_ERROR(draw_health_row(row_y0 + row_h * 7, "NEXT", next_buf, muted, text),
+                        TAG, "draw next failed");
+    ESP_RETURN_ON_ERROR(draw_health_row(row_y0 + row_h * 8, "WEATHER", weather_buf, muted, text),
+                        TAG, "draw weather age failed");
+    ESP_RETURN_ON_ERROR(draw_health_row(row_y0 + row_h * 9, "KOMARI", komari_buf, muted, text),
+                        TAG, "draw komari age failed");
+    ESP_RETURN_ON_ERROR(draw_health_row(row_y0 + row_h * 10, "VER", version_buf, muted, text),
+                        TAG, "draw version failed");
+    ESP_RETURN_ON_ERROR(draw_health_row(row_y0 + row_h * 11, "OTA", ota_buf, muted,
+                                        ota.status == OTA_STATUS_FAILED ? warning : text),
+                        TAG, "draw ota state failed");
+
+    ESP_RETURN_ON_ERROR(lcd_fill_round_rect(HEALTH_OTA_HIT_X, HEALTH_OTA_HIT_Y,
+                                            HEALTH_OTA_HIT_W, HEALTH_OTA_HIT_H,
+                                            6, button_bg),
+                        TAG, "draw health ota button failed");
+    ESP_RETURN_ON_ERROR(draw_text5_centered(HEALTH_OTA_HIT_X + HEALTH_OTA_HIT_W / 2,
+                                            HEALTH_OTA_HIT_Y + 8, "UPDATE", 1, button_text),
+                        TAG, "draw health ota button text failed");
+    return lcd_canvas_flush();
+}
+
+static esp_err_t draw_ota_confirm_screen(const struct tm *tm)
+{
+    const uint16_t text = rgb565(232, 240, 255);
+    const uint16_t muted = rgb565(145, 161, 196);
+    const uint16_t accent = rgb565(255, 211, 85);
+    const uint16_t border = rgb565(84, 116, 160);
+    const uint16_t box = rgb565(8, 14, 32);
+    const uint16_t yes_bg = rgb565(255, 196, 76);
+    const uint16_t no_bg = rgb565(36, 48, 78);
+    const uint16_t dark = rgb565(15, 20, 30);
+
+    ESP_RETURN_ON_ERROR(draw_view_background(rgb565(5, 8, 22), rgb565(12, 18, 34)),
+                        TAG, "draw ota confirm bg failed");
+    ESP_RETURN_ON_ERROR(draw_view_header("OTA", tm), TAG, "draw ota confirm header failed");
+
+    ESP_RETURN_ON_ERROR(lcd_fill_round_rect(OTA_CONFIRM_BOX_X, OTA_CONFIRM_BOX_Y,
+                                            OTA_CONFIRM_BOX_W, OTA_CONFIRM_BOX_H, 8, border),
+                        TAG, "draw ota confirm border failed");
+    ESP_RETURN_ON_ERROR(lcd_fill_round_rect(OTA_CONFIRM_BOX_X + 2, OTA_CONFIRM_BOX_Y + 2,
+                                            OTA_CONFIRM_BOX_W - 4, OTA_CONFIRM_BOX_H - 4, 7, box),
+                        TAG, "draw ota confirm box failed");
+    ESP_RETURN_ON_ERROR(draw_text5_centered(160, OTA_CONFIRM_BOX_Y + 22,
+                                            "OTA UPDATE", 1, text),
+                        TAG, "draw ota confirm title failed");
+    ESP_RETURN_ON_ERROR(draw_text5_centered(160, OTA_CONFIRM_BOX_Y + 43,
+                                            "HTTPS ONLY", 1, muted),
+                        TAG, "draw ota confirm body failed");
+
+    ESP_RETURN_ON_ERROR(lcd_fill_round_rect(OTA_CONFIRM_YES_X, OTA_CONFIRM_YES_Y,
+                                            OTA_CONFIRM_BUTTON_W, OTA_CONFIRM_BUTTON_H,
+                                            6, yes_bg),
+                        TAG, "draw ota yes button failed");
+    ESP_RETURN_ON_ERROR(lcd_fill_round_rect(OTA_CONFIRM_NO_X, OTA_CONFIRM_NO_Y,
+                                            OTA_CONFIRM_BUTTON_W, OTA_CONFIRM_BUTTON_H,
+                                            6, no_bg),
+                        TAG, "draw ota no button failed");
+    ESP_RETURN_ON_ERROR(draw_text5_centered(OTA_CONFIRM_YES_X + OTA_CONFIRM_BUTTON_W / 2,
+                                            OTA_CONFIRM_YES_Y + 8, "YES", 1, dark),
+                        TAG, "draw ota yes text failed");
+    ESP_RETURN_ON_ERROR(draw_text5_centered(OTA_CONFIRM_NO_X + OTA_CONFIRM_BUTTON_W / 2,
+                                            OTA_CONFIRM_NO_Y + 8, "NO", 1, accent),
+                        TAG, "draw ota no text failed");
+    return lcd_canvas_flush();
+}
+
 static esp_err_t draw_current_view(const struct tm *tm, app_view_t view)
 {
     switch (view) {
@@ -5164,6 +5800,8 @@ static esp_err_t draw_current_view(const struct tm *tm, app_view_t view)
         return draw_today_weather_screen(tm);
     case APP_VIEW_WIFI_CONFIRM:
         return draw_wifi_reprovision_confirm_screen(tm);
+    case APP_VIEW_OTA_CONFIRM:
+        return draw_ota_confirm_screen(tm);
     case APP_VIEW_ANALOG_CLOCK:
         return draw_analog_clock_screen(tm);
     case APP_VIEW_CALENDAR:
@@ -5172,6 +5810,8 @@ static esp_err_t draw_current_view(const struct tm *tm, app_view_t view)
         return draw_weather_screen(tm);
     case APP_VIEW_KOMARI:
         return draw_komari_screen(tm);
+    case APP_VIEW_HEALTH:
+        return draw_health_screen(tm);
     case APP_VIEW_DASHBOARD:
     default:
         return draw_clock_screen(tm);
@@ -5371,6 +6011,9 @@ static esp_err_t provisioning_root_handler(httpd_req_t *req)
         "<label>Komari 地址（可选）</label><input name='komari_url' maxlength='191' autocomplete='off' "
         "placeholder='https://komari.example.com'>"
         "<p class='hint'>填写后首页会显示 Komari 在线状态栏，留空则关闭。</p>"
+        "<label>OTA 地址（可选）</label><input name='ota_url' maxlength='255' autocomplete='off' "
+        "placeholder='https://github.com/lengyuesky/esp32-2432s028r_clock/releases/latest/download/cyd_clock.bin'>"
+        "<p class='hint'>留空使用默认 GitHub Releases HTTPS OTA 地址，仅支持 HTTPS。</p>"
         "<button type='submit'>保存并连接</button></form>"
         "<p class='hint'>如果手机没有自动弹出页面，请在浏览器打开 192.168.4.1。</p>"
         "</main></body></html>");
@@ -5400,11 +6043,15 @@ static esp_err_t provisioning_save_handler(httpd_req_t *req)
     char password[WIFI_PASSWORD_LEN] = {0};
     char komari_url[KOMARI_URL_LEN] = {0};
     char normalized_komari_url[KOMARI_URL_LEN] = {0};
+    char ota_url[OTA_URL_LEN] = {0};
+    char normalized_ota_url[OTA_URL_LEN] = {0};
     form_get_value(form, "ssid", ssid, sizeof(ssid));
     form_get_value(form, "password", password, sizeof(password));
     form_get_value(form, "komari_url", komari_url, sizeof(komari_url));
+    form_get_value(form, "ota_url", ota_url, sizeof(ota_url));
     char *trimmed_ssid = trim_ascii(ssid);
     char *trimmed_komari_url = trim_ascii(komari_url);
+    char *trimmed_ota_url = trim_ascii(ota_url);
     if (strlen(trimmed_ssid) == 0) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "empty ssid");
         return ESP_FAIL;
@@ -5412,6 +6059,10 @@ static esp_err_t provisioning_save_handler(httpd_req_t *req)
     if (!komari_normalize_url(trimmed_komari_url, normalized_komari_url,
                               sizeof(normalized_komari_url))) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid komari url");
+        return ESP_FAIL;
+    }
+    if (!ota_normalize_url(trimmed_ota_url, normalized_ota_url, sizeof(normalized_ota_url))) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid ota url");
         return ESP_FAIL;
     }
 
@@ -5423,6 +6074,11 @@ static esp_err_t provisioning_save_handler(httpd_req_t *req)
     ret = komari_config_save(normalized_komari_url);
     if (ret != ESP_OK) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "save komari failed");
+        return ESP_FAIL;
+    }
+    ret = ota_config_save(normalized_ota_url);
+    if (ret != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "save ota failed");
         return ESP_FAIL;
     }
 
@@ -6187,6 +6843,8 @@ static const char *view_name(app_view_t view)
         return "today-weather";
     case APP_VIEW_WIFI_CONFIRM:
         return "wifi-confirm";
+    case APP_VIEW_OTA_CONFIRM:
+        return "ota-confirm";
     case APP_VIEW_ANALOG_CLOCK:
         return "time";
     case APP_VIEW_CALENDAR:
@@ -6195,6 +6853,8 @@ static const char *view_name(app_view_t view)
         return "weather";
     case APP_VIEW_KOMARI:
         return "komari";
+    case APP_VIEW_HEALTH:
+        return "health";
     case APP_VIEW_DASHBOARD:
     default:
         return "dashboard";
@@ -6233,7 +6893,18 @@ static bool touch_poll_view_change(app_view_t *view)
     int nav_count = nav_card_count(show_komari);
     bool redraw = false;
 
-    if (*view == APP_VIEW_WIFI_CONFIRM) {
+    if (*view == APP_VIEW_OTA_CONFIRM) {
+        if (point_in_rect(x, y, OTA_CONFIRM_YES_X, OTA_CONFIRM_YES_Y,
+                          OTA_CONFIRM_BUTTON_W, OTA_CONFIRM_BUTTON_H)) {
+            (void)ota_start_update();
+            next_view = APP_VIEW_HEALTH;
+        } else if (point_in_rect(x, y, OTA_CONFIRM_NO_X, OTA_CONFIRM_NO_Y,
+                                 OTA_CONFIRM_BUTTON_W, OTA_CONFIRM_BUTTON_H) ||
+                   !point_in_rect(x, y, OTA_CONFIRM_BOX_X, OTA_CONFIRM_BOX_Y,
+                                  OTA_CONFIRM_BOX_W, OTA_CONFIRM_BOX_H)) {
+            next_view = APP_VIEW_HEALTH;
+        }
+    } else if (*view == APP_VIEW_WIFI_CONFIRM) {
         if (point_in_rect(x, y, WIFI_CONFIRM_YES_X, WIFI_CONFIRM_YES_Y,
                           WIFI_CONFIRM_BUTTON_W, WIFI_CONFIRM_BUTTON_H)) {
             request_wifi_reprovision();
@@ -6247,6 +6918,13 @@ static bool touch_poll_view_change(app_view_t *view)
     } else if (point_in_rect(x, y, WIFI_STATUS_HIT_X, WIFI_STATUS_HIT_Y,
                              WIFI_STATUS_HIT_W, WIFI_STATUS_HIT_H)) {
         next_view = APP_VIEW_WIFI_CONFIRM;
+    } else if (*view == APP_VIEW_HEALTH) {
+        if (point_in_rect(x, y, HEALTH_OTA_HIT_X, HEALTH_OTA_HIT_Y,
+                          HEALTH_OTA_HIT_W, HEALTH_OTA_HIT_H)) {
+            next_view = APP_VIEW_OTA_CONFIRM;
+        } else {
+            next_view = APP_VIEW_DASHBOARD;
+        }
     } else if (*view == APP_VIEW_TODAY_WEATHER) {
         if (x >= CLOCK_PANEL_X + CLOCK_PANEL_W / 2) {
             if (s_today_hourly_page < TODAY_HOURLY_PAGE_COUNT - 1) {
@@ -6275,6 +6953,10 @@ static bool touch_poll_view_change(app_view_t *view)
         }
     }
     if (next_view == *view && *view == APP_VIEW_DASHBOARD &&
+        point_in_rect(x, y, HEALTH_STATUS_HIT_X, HEALTH_STATUS_HIT_Y,
+                      HEALTH_STATUS_HIT_W, HEALTH_STATUS_HIT_H)) {
+        next_view = APP_VIEW_HEALTH;
+    } else if (next_view == *view && *view == APP_VIEW_DASHBOARD &&
         point_in_rect(x, y, CLOCK_PANEL_X + 28, CLOCK_PANEL_Y + 48,
                       CLOCK_PANEL_W - 56, 60)) {
         next_view = APP_VIEW_ANALOG_CLOCK;
@@ -6421,18 +7103,23 @@ void app_main(void)
     setenv("TZ", CONFIG_CLOCK_TIMEZONE, 1);
     tzset();
     esp_reset_reason_t reset_reason = esp_reset_reason();
+    s_last_reset_reason = reset_reason;
     ESP_LOGI(TAG, "boot reset_reason=%s(%d)", reset_reason_name(reset_reason), (int)reset_reason);
     if (reset_reason == ESP_RST_BROWNOUT) {
         ESP_LOGW(TAG, "last reset was brownout; check USB cable, power supply and backlight current");
     }
+    ota_mark_running_app_valid();
     log_runtime_health("boot");
     set_time_from_build();
+    s_boot_time = time(NULL);
 
     ESP_ERROR_CHECK(init_nvs());
     ESP_ERROR_CHECK(network_fetch_lock_init());
     ESP_ERROR_CHECK(weather_state_init());
     ESP_ERROR_CHECK(komari_state_init());
     ESP_ERROR_CHECK(komari_config_load());
+    ESP_ERROR_CHECK(ota_state_init());
+    ESP_ERROR_CHECK(ota_config_load());
     ESP_ERROR_CHECK(lcd_init());
     ESP_ERROR_CHECK(touch_init());
     ESP_ERROR_CHECK(draw_static_background());

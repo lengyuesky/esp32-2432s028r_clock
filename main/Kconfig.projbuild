@@ -66,6 +66,13 @@ menu "CYD Clock"
         range 1 180
         default 10
 
+    config CLOCK_OTA_DEFAULT_URL
+        string "Default HTTPS OTA firmware URL"
+        default "https://github.com/lengyuesky/esp32-2432s028r_clock/releases/latest/download/cyd_clock.bin"
+        help
+            默认 OTA 固件地址。配网页面填写 OTA 地址后会覆盖此默认值。
+            OTA 仅支持 HTTPS。
+
     config CLOCK_TOUCH_ENABLE
         bool "Enable XPT2046 touch controller"
         default y
