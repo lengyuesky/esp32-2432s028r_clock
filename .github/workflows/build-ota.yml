@@ -1,0 +1,68 @@
+name: Build OTA firmware
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ota-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-ota:
+    name: Build ESP32 OTA image
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Build firmware
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: v5.4.2
+          target: esp32
+          path: .
+
+      - name: Prepare OTA artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s build/cyd_clock.bin
+          mkdir -p ota
+          cp build/cyd_clock.bin ota/cyd_clock.bin
+          sha256sum ota/cyd_clock.bin > ota/cyd_clock.bin.sha256
+          cp build/partition_table/partition-table.bin ota/partition-table.bin
+          cp build/ota_data_initial.bin ota/ota_data_initial.bin
+
+      - name: Upload OTA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cyd-clock-ota-${{ github.sha }}
+          if-no-files-found: error
+          path: |
+            ota/cyd_clock.bin
+            ota/cyd_clock.bin.sha256
+            ota/partition-table.bin
+            ota/ota_data_initial.bin
+
+      - name: Upload OTA image to release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release upload "${{ github.event.release.tag_name }}" \
+            ota/cyd_clock.bin \
+            ota/cyd_clock.bin.sha256 \
+            --clobber
