@@ -1838,7 +1838,7 @@ static void ota_task(void *arg)
     esp_https_ota_config_t ota_config = {
         .http_config = &http_config,
         .bulk_flash_erase = false,
-        .partial_http_download = false,
+        .partial_http_download = true,
         .max_http_request_size = OTA_HTTP_REQUEST_SIZE,
     };
 
