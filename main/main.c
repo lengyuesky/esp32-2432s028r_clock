@@ -452,6 +452,40 @@ static const char *reset_reason_name(esp_reset_reason_t reason)
     }
 }
 
+static const char *reset_reason_text_zh(esp_reset_reason_t reason)
+{
+    switch (reason) {
+    case ESP_RST_POWERON:
+        return "上电";
+    case ESP_RST_EXT:
+        return "外部";
+    case ESP_RST_SW:
+        return "软件";
+    case ESP_RST_PANIC:
+        return "崩溃";
+    case ESP_RST_INT_WDT:
+    case ESP_RST_TASK_WDT:
+    case ESP_RST_WDT:
+        return "看门狗";
+    case ESP_RST_DEEPSLEEP:
+        return "睡眠";
+    case ESP_RST_BROWNOUT:
+        return "欠压";
+    case ESP_RST_SDIO:
+    case ESP_RST_USB:
+    case ESP_RST_JTAG:
+    case ESP_RST_EFUSE:
+        return "外设";
+    case ESP_RST_PWR_GLITCH:
+        return "电源";
+    case ESP_RST_CPU_LOCKUP:
+        return "锁死";
+    case ESP_RST_UNKNOWN:
+    default:
+        return "未知";
+    }
+}
+
 static void log_runtime_health(const char *scope)
 {
     ESP_LOGI(TAG, "%s health: heap_free=%u heap_min=%u heap_largest=%u stack_free=%u",
@@ -1089,6 +1123,48 @@ static const zh16_glyph_t zh16_glyphs[] = {
     {"待", {0x1020, 0x33FE, 0x6020, 0x4820, 0x1820, 0x17FE, 0x3008, 0x7008, 0x57FE, 0x1008, 0x1108, 0x1088, 0x10C8, 0x1008, 0x1038, 0x0000}},
     {"来", {0x0180, 0x0180, 0x3FFC, 0x0180, 0x1988, 0x0998, 0x0990, 0x0990, 0x7FFE, 0x03C0, 0x07E0, 0x0DB0, 0x1998, 0x318C, 0x4182, 0x0180}},
     {"源", {0x37FE, 0x1E30, 0x0620, 0x07FE, 0x4786, 0x37FE, 0x0786, 0x0586, 0x15FE, 0x1430, 0x14B4, 0x25B6, 0x2D32, 0x6B32, 0x0860, 0x0000}},
+    {"设", {0x30F8, 0x1888, 0x0888, 0x0188, 0x010E, 0x7300, 0x1200, 0x13FC, 0x110C, 0x1188, 0x10D8, 0x1C70, 0x18F0, 0x339E, 0x0206, 0x0000}},
+    {"状", {0x0868, 0x4864, 0x6866, 0x2860, 0x3FFE, 0x0860, 0x0860, 0x1870, 0x3870, 0x68D0, 0x4898, 0x0988, 0x0B0C, 0x0F06, 0x0A02, 0x0000}},
+    {"态", {0x0180, 0x0180, 0x7FFE, 0x03C0, 0x0340, 0x0660, 0x0F38, 0x798E, 0x6102, 0x2988, 0x2CCC, 0x2C54, 0x6C16, 0x47F2, 0x0000, 0x0000}},
+    {"地", {0x1020, 0x1120, 0x1126, 0x7D3E, 0x31F6, 0x13A6, 0x1726, 0x1126, 0x1126, 0x3D2C, 0x7120, 0x4102, 0x0102, 0x01FE, 0x0000, 0x0000}},
+    {"址", {0x1030, 0x1030, 0x1030, 0x7D30, 0x1130, 0x113E, 0x1130, 0x1130, 0x1530, 0x1D30, 0x7130, 0x4130, 0x0130, 0x07FF, 0x0000, 0x0000}},
+    {"信", {0x0BFC, 0x1800, 0x17FF, 0x3000, 0x7000, 0x73FC, 0xD000, 0x13FC, 0x1000, 0x13FC, 0x1204, 0x1204, 0x1204, 0x13FC, 0x1204, 0x0000}},
+    {"号", {0x1008, 0x1008, 0x1008, 0x1FF8, 0x0000, 0x7FFE, 0x0C00, 0x0800, 0x1FF8, 0x1808, 0x0018, 0x0018, 0x0010, 0x01F0, 0x0000, 0x0000}},
+    {"内", {0x0180, 0x7FFE, 0x6186, 0x6186, 0x6186, 0x6186, 0x63C6, 0x6666, 0x6E36, 0x7C1E, 0x6006, 0x6006, 0x6006, 0x603C, 0x0000, 0x0000}},
+    {"存", {0x0200, 0x0600, 0x7FFE, 0x0400, 0x0C00, 0x19FC, 0x1818, 0x3030, 0x7020, 0x57FE, 0x1020, 0x1020, 0x1020, 0x1020, 0x11E0, 0x0000}},
+    {"低", {0x083C, 0x1BF0, 0x1230, 0x3230, 0x7230, 0xF3FE, 0xF230, 0x3210, 0x3210, 0x3210, 0x33F8, 0x370B, 0x300F, 0x37F6, 0x1000, 0x0000}},
+    {"值", {0x0860, 0x1FFE, 0x1040, 0x3040, 0x33FC, 0x7204, 0x73FC, 0x3204, 0x33FC, 0x3204, 0x3204, 0x33FC, 0x3204, 0x3FFE, 0x1000, 0x0000}},
+    {"当", {0x318C, 0x118C, 0x1998, 0x0990, 0x0180, 0x3FFC, 0x000C, 0x0004, 0x0004, 0x1FFC, 0x000C, 0x0004, 0x000C, 0x3FFC, 0x0004, 0x0000}},
+    {"前", {0x0C30, 0x7FFE, 0x0000, 0x0004, 0x3F24, 0x2324, 0x3F24, 0x2324, 0x2324, 0x3F24, 0x2324, 0x2304, 0x2304, 0x271C, 0x0000, 0x0000}},
+    {"次", {0x2100, 0x3300, 0x1BFE, 0x0266, 0x0646, 0x0C64, 0x0464, 0x0860, 0x18E0, 0x30B0, 0x6190, 0x4318, 0x060C, 0x0C06, 0x0802, 0x0000}},
+    {"监", {0x2460, 0x2460, 0x247E, 0x24C0, 0x24B0, 0x2598, 0x240C, 0x0000, 0x3FFC, 0x324C, 0x324C, 0x324C, 0x324C, 0x7FFE, 0x0000, 0x0000}},
+    {"控", {0x13FE, 0x32D2, 0x7ED2, 0x1090, 0x1192, 0x131E, 0x7800, 0x73FE, 0x1020, 0x1020, 0x1020, 0x1020, 0x37FE, 0x7000, 0x0000, 0x0000}},
+    {"版", {0x2CFE, 0x2C80, 0x2C80, 0x2C80, 0x3EFE, 0x20C6, 0x20E6, 0x61E4, 0x7DA4, 0x65BC, 0x6598, 0x4518, 0x453C, 0xC766, 0x0402, 0x0000}},
+    {"本", {0x0180, 0x0180, 0x0180, 0x7FFE, 0x03C0, 0x03C0, 0x05E0, 0x0DB0, 0x1998, 0x318C, 0x6FF6, 0x4182, 0x0180, 0x0180, 0x0180, 0x0000}},
+    {"关", {0x0C30, 0x0420, 0x0420, 0x1FF8, 0x0180, 0x0180, 0x0180, 0x1FF8, 0x0180, 0x0180, 0x03C0, 0x0660, 0x0E30, 0x1818, 0x1008, 0x0000}},
+    {"闭", {0x1806, 0x0046, 0x6046, 0x6046, 0x6FFE, 0x60C6, 0x61C6, 0x6346, 0x6646, 0x7C46, 0x6046, 0x61C6, 0x6006, 0x601C, 0x0000, 0x0000}},
+    {"空", {0x0180, 0x7FFE, 0x6666, 0x6646, 0x0440, 0x0C46, 0x387C, 0x6000, 0x0000, 0x1FFC, 0x0180, 0x0180, 0x0180, 0x7FFE, 0x0000, 0x0000}},
+    {"闲", {0x1806, 0x0806, 0x6186, 0x6186, 0x6FFE, 0x61C6, 0x63C6, 0x67E6, 0x65B6, 0x6996, 0x6986, 0x6186, 0x6186, 0x601C, 0x0000, 0x0000}},
+    {"秒", {0x3C30, 0x7830, 0x18B4, 0x18B4, 0x7FB6, 0x1932, 0x1B32, 0x3F30, 0x3C34, 0x786C, 0x580C, 0x1818, 0x1870, 0x19E0, 0x1900, 0x0000}},
+    {"分", {0x0C30, 0x0818, 0x1808, 0x300C, 0x6006, 0x5FFA, 0x0308, 0x0208, 0x0218, 0x0618, 0x0418, 0x0C18, 0x3810, 0x70F0, 0x0000, 0x0000}},
+    {"上", {0x0100, 0x0100, 0x0100, 0x0100, 0x0100, 0x01FC, 0x0100, 0x0100, 0x0100, 0x0100, 0x0100, 0x0100, 0x0100, 0x7FFE, 0x0000, 0x0000}},
+    {"电", {0x0180, 0x0180, 0x3FFC, 0x218C, 0x218C, 0x3FFC, 0x218C, 0x218C, 0x218C, 0x3FFC, 0x2180, 0x0182, 0x0182, 0x00FE, 0x0000, 0x0000}},
+    {"外", {0x0810, 0x1810, 0x1F90, 0x1190, 0x31D0, 0x7170, 0x7B30, 0x0E18, 0x061C, 0x0616, 0x0C12, 0x1810, 0x3010, 0x7010, 0x4010, 0x0000}},
+    {"部", {0x0C7E, 0x7FE6, 0x2366, 0x3364, 0x326C, 0x1268, 0x7FEC, 0x0064, 0x3F62, 0x2162, 0x2162, 0x2166, 0x216E, 0x3F60, 0x2120, 0x0000}},
+    {"软", {0x1860, 0x7F40, 0x107E, 0x10C2, 0x3CC2, 0x2C96, 0x6CB4, 0x7F30, 0x0C30, 0x0C30, 0x3F38, 0x7C68, 0x0CCC, 0x0D86, 0x0D02, 0x0000}},
+    {"件", {0x0920, 0x1B20, 0x1360, 0x33FE, 0x3620, 0x7620, 0x5020, 0x1060, 0x17FE, 0x1020, 0x1020, 0x1020, 0x1020, 0x1020, 0x1020, 0x0000}},
+    {"崩", {0x2184, 0x3FFC, 0x0000, 0x3E7C, 0x2244, 0x2244, 0x3E7C, 0x2244, 0x2244, 0x3E7C, 0x62C4, 0x62C4, 0x4284, 0x4E9C, 0x0000, 0x0000}},
+    {"溃", {0x33FC, 0x1A64, 0x0264, 0x03FC, 0x4060, 0x77FE, 0x1000, 0x03FC, 0x0204, 0x1A64, 0x1264, 0x3264, 0x20D0, 0x638C, 0x0602, 0x0000}},
+    {"看", {0x3FF0, 0x0300, 0x3FFC, 0x0200, 0x0600, 0x7FFE, 0x0C00, 0x1FFC, 0x380C, 0x6FFC, 0x480C, 0x0FFC, 0x080C, 0x0FFC, 0x0808, 0x0000}},
+    {"门", {0x0180, 0x0180, 0x7FFE, 0x6186, 0x6186, 0x6186, 0x6006, 0x6006, 0x6006, 0x6006, 0x6006, 0x6006, 0x6006, 0x6004, 0x601C, 0x0000}},
+    {"狗", {0x3980, 0x31FE, 0x7B02, 0x5A02, 0x0FF6, 0x1916, 0x1916, 0x3916, 0x6916, 0x49F6, 0x0906, 0x0804, 0x1804, 0x703C, 0x0000, 0x0000}},
+    {"睡", {0x7FF8, 0x4C20, 0x4C20, 0x4FFE, 0x7D24, 0x4D24, 0x4FFF, 0x7D24, 0x4D24, 0x4D24, 0x4FFE, 0x7C20, 0x4020, 0x47FE, 0x0000, 0x0000}},
+    {"眠", {0x4D06, 0x4D02, 0x4D02, 0x7DFE, 0x4D10, 0x4D10, 0x7DFE, 0x4D10, 0x4D18, 0x4D18, 0x7D08, 0x41B9, 0x03EF, 0x0206, 0x0000, 0x0000}},
+    {"欠", {0x0800, 0x1800, 0x1FFE, 0x1186, 0x3184, 0x618C, 0x618C, 0x0188, 0x03C0, 0x0240, 0x0660, 0x0C30, 0x1818, 0x700E, 0x4002, 0x0000}},
+    {"压", {0x2000, 0x20C0, 0x20C0, 0x20C0, 0x20C0, 0x2FFE, 0x20C0, 0x20D0, 0x20D8, 0x60CC, 0x60C0, 0x40C0, 0x5FFE, 0x4000, 0x0000, 0x0000}},
+    {"锁", {0x31B6, 0x3EB4, 0x60B8, 0x4030, 0x3DFC, 0x1984, 0x11B4, 0x19B4, 0x7FB4, 0x11A4, 0x11A4, 0x1164, 0x1CD8, 0x198E, 0x0302, 0x0000}},
+    {"死", {0x7FFE, 0x0840, 0x1840, 0x1F44, 0x314E, 0x2178, 0x7370, 0x5A60, 0x0E40, 0x0640, 0x0C42, 0x1842, 0x3062, 0x607E, 0x0000, 0x0000}},
+    {"知", {0x3000, 0x207E, 0x7F46, 0x6846, 0x4846, 0x0846, 0x7FC6, 0x0846, 0x0846, 0x1C46, 0x1646, 0x3346, 0x317E, 0x6046, 0x4000, 0x0000}},
 };
 
 static const uint8_t *font_for_char(char ch)
@@ -1641,6 +1717,21 @@ static const char *ota_status_text(ota_status_t status)
     case OTA_STATUS_IDLE:
     default:
         return "IDLE";
+    }
+}
+
+static const char *ota_status_text_zh(ota_status_t status)
+{
+    switch (status) {
+    case OTA_STATUS_RUNNING:
+        return "下载";
+    case OTA_STATUS_SUCCESS:
+        return "完成";
+    case OTA_STATUS_FAILED:
+        return "失败";
+    case OTA_STATUS_IDLE:
+    default:
+        return "空闲";
     }
 }
 
@@ -5714,13 +5805,13 @@ static void format_time_age(time_t timestamp, char *out, size_t out_len)
     time_t now = time(NULL);
     long seconds = now >= timestamp ? (long)difftime(now, timestamp) : 0;
     if (seconds < 60) {
-        snprintf(out, out_len, "%ldS AGO", seconds);
+        snprintf(out, out_len, "%ld秒前", seconds);
     } else if (seconds < 3600) {
-        snprintf(out, out_len, "%ldM AGO", seconds / 60);
+        snprintf(out, out_len, "%ld分前", seconds / 60);
     } else if (seconds < 86400) {
-        snprintf(out, out_len, "%ldH AGO", seconds / 3600);
+        snprintf(out, out_len, "%ld时前", seconds / 3600);
     } else {
-        snprintf(out, out_len, "%ldD AGO", seconds / 86400);
+        snprintf(out, out_len, "%ld天前", seconds / 86400);
     }
 }
 
@@ -5742,19 +5833,23 @@ static void format_partition_label(const esp_partition_t *partition, char *out, 
     out[out_pos] = '\0';
 }
 
-static esp_err_t draw_health_row(int y, const char *label, const char *value,
+static esp_err_t draw_health_row(int x, int y, int w, const char *label, const char *value,
                                  uint16_t label_color, uint16_t value_color)
 {
     const uint16_t line = rgb565(28, 42, 67);
-    const int label_x = CLOCK_PANEL_X + 16;
-    const int value_x = CLOCK_PANEL_X + 76;
+    const int label_w = 38;
+    const int value_x = x + 44;
+    int value_w = w - (value_x - x);
+    if (value_w < 0) {
+        value_w = 0;
+    }
 
-    ESP_RETURN_ON_ERROR(draw_text5(label_x, y, label, 1, label_color),
+    ESP_RETURN_ON_ERROR(draw_text_mixed_limited(x, y, label, label_w, 1, label_color),
                         TAG, "draw health label failed");
-    ESP_RETURN_ON_ERROR(draw_text5_limited(value_x, y, value != NULL ? value : "--",
-                                           30, 1, value_color),
+    ESP_RETURN_ON_ERROR(draw_text_mixed_limited(value_x, y, value != NULL ? value : "--",
+                                                value_w, 1, value_color),
                         TAG, "draw health value failed");
-    return lcd_draw_hline(label_x, y + 9, CLOCK_PANEL_W - 32, line);
+    return lcd_draw_hline(x, y + 16, w, line);
 }
 
 static esp_err_t draw_health_screen(const struct tm *tm)
@@ -5766,8 +5861,15 @@ static esp_err_t draw_health_screen(const struct tm *tm)
     const uint16_t warning = rgb565(255, 211, 85);
     const uint16_t button_bg = rgb565(255, 196, 76);
     const uint16_t button_text = rgb565(15, 20, 30);
-    const int row_y0 = CLOCK_PANEL_Y + 48;
-    const int row_h = 11;
+    const int full_x = CLOCK_PANEL_X + 16;
+    const int full_w = CLOCK_PANEL_W - 32;
+    const int full_y0 = CLOCK_PANEL_Y + 46;
+    const int full_row_h = 18;
+    const int col_y0 = CLOCK_PANEL_Y + 84;
+    const int col_row_h = 17;
+    const int left_x = CLOCK_PANEL_X + 16;
+    const int right_x = CLOCK_PANEL_X + 154;
+    const int col_w = 126;
     char uptime_buf[24];
     char ip_buf[24];
     char rssi_buf[24];
@@ -5807,7 +5909,7 @@ static esp_err_t draw_health_screen(const struct tm *tm)
     snprintf(heap_buf, sizeof(heap_buf), "%uK", (unsigned)(heap_free / 1024));
     snprintf(heap_min_buf, sizeof(heap_min_buf), "%uK/%uK",
              (unsigned)(heap_min / 1024), (unsigned)(heap_largest / 1024));
-    strlcpy(reset_buf, reset_reason_name(s_last_reset_reason), sizeof(reset_buf));
+    strlcpy(reset_buf, reset_reason_text_zh(s_last_reset_reason), sizeof(reset_buf));
     format_partition_label(running, running_buf, sizeof(running_buf));
     format_partition_label(next, next_buf, sizeof(next_buf));
 
@@ -5815,61 +5917,51 @@ static esp_err_t draw_health_screen(const struct tm *tm)
     format_time_age(weather.updated_at, weather_buf, sizeof(weather_buf));
     komari_get_snapshot(&komari);
     if (!komari.configured) {
-        strlcpy(komari_buf, "OFF", sizeof(komari_buf));
+        strlcpy(komari_buf, "关闭", sizeof(komari_buf));
     } else {
         format_time_age(komari.updated_at, komari_buf, sizeof(komari_buf));
     }
     strlcpy(version_buf, app_desc != NULL ? app_desc->version : "--", sizeof(version_buf));
     ota_get_snapshot(&ota);
     if (ota.status == OTA_STATUS_RUNNING && ota.progress_percent >= 0) {
-        snprintf(ota_buf, sizeof(ota_buf), "%s %d%%", ota_status_text(ota.status),
+        snprintf(ota_buf, sizeof(ota_buf), "%s %d%%", ota_status_text_zh(ota.status),
                  ota.progress_percent);
     } else if (ota.status == OTA_STATUS_FAILED && ota.last_error != ESP_OK) {
-        snprintf(ota_buf, sizeof(ota_buf), "%s %s", ota_status_text(ota.status),
+        snprintf(ota_buf, sizeof(ota_buf), "%s %s", ota_status_text_zh(ota.status),
                  esp_err_to_name(ota.last_error));
     } else {
-        strlcpy(ota_buf, ota.message[0] != '\0' ? ota.message : ota_status_text(ota.status),
-                sizeof(ota_buf));
+        strlcpy(ota_buf, ota_status_text_zh(ota.status), sizeof(ota_buf));
     }
 
     ESP_RETURN_ON_ERROR(draw_view_background(rgb565(5, 9, 23), rgb565(9, 20, 33)),
                         TAG, "draw health bg failed");
-    ESP_RETURN_ON_ERROR(draw_view_header("健康", tm), TAG, "draw health header failed");
-    ESP_RETURN_ON_ERROR(lcd_fill_vertical_blend_rect(CLOCK_PANEL_X + 1, CLOCK_PANEL_Y + 42,
-                                                     CLOCK_PANEL_W - 2, 22,
-                                                     rgb565(10, 31, 48), rgb565(8, 20, 36)),
-                        TAG, "draw health band failed");
-    ESP_RETURN_ON_ERROR(draw_text5(CLOCK_PANEL_X + 18, CLOCK_PANEL_Y + 49,
-                                   "HEALTH", 1, accent),
-                        TAG, "draw health title failed");
-    ESP_RETURN_ON_ERROR(draw_text5(CLOCK_PANEL_X + CLOCK_PANEL_W - text5_width("OTA", 1) - 18,
-                                   CLOCK_PANEL_Y + 49, "OTA", 1,
-                                   ota.status == OTA_STATUS_FAILED ? warning : accent),
-                        TAG, "draw health ota mark failed");
+    ESP_RETURN_ON_ERROR(draw_view_header("设备状态", tm), TAG, "draw health header failed");
 
-    ESP_RETURN_ON_ERROR(draw_health_row(row_y0 + row_h * 0, "UPTIME", uptime_buf, accent, text),
+    ESP_RETURN_ON_ERROR(draw_health_row(full_x, full_y0, full_w, "启动", uptime_buf, accent, text),
                         TAG, "draw uptime failed");
-    ESP_RETURN_ON_ERROR(draw_health_row(row_y0 + row_h * 1, "IP", ip_buf, muted, text),
+    ESP_RETURN_ON_ERROR(draw_health_row(full_x, full_y0 + full_row_h, full_w, "地址", ip_buf, muted, text),
                         TAG, "draw ip failed");
-    ESP_RETURN_ON_ERROR(draw_health_row(row_y0 + row_h * 2, "RSSI", rssi_buf, muted, text),
+
+    ESP_RETURN_ON_ERROR(draw_health_row(left_x, col_y0 + col_row_h * 0, col_w, "信号", rssi_buf, muted, text),
                         TAG, "draw rssi failed");
-    ESP_RETURN_ON_ERROR(draw_health_row(row_y0 + row_h * 3, "HEAP", heap_buf, muted, text),
+    ESP_RETURN_ON_ERROR(draw_health_row(left_x, col_y0 + col_row_h * 1, col_w, "内存", heap_buf, muted, text),
                         TAG, "draw heap failed");
-    ESP_RETURN_ON_ERROR(draw_health_row(row_y0 + row_h * 4, "MIN", heap_min_buf, muted, text),
+    ESP_RETURN_ON_ERROR(draw_health_row(left_x, col_y0 + col_row_h * 2, col_w, "低值", heap_min_buf, muted, text),
                         TAG, "draw heap min failed");
-    ESP_RETURN_ON_ERROR(draw_health_row(row_y0 + row_h * 5, "RESET", reset_buf, muted, text),
+    ESP_RETURN_ON_ERROR(draw_health_row(left_x, col_y0 + col_row_h * 3, col_w, "重启", reset_buf, muted, text),
                         TAG, "draw reset failed");
-    ESP_RETURN_ON_ERROR(draw_health_row(row_y0 + row_h * 6, "RUN", running_buf, muted, text),
+    ESP_RETURN_ON_ERROR(draw_health_row(left_x, col_y0 + col_row_h * 4, col_w, "当前", running_buf, muted, text),
                         TAG, "draw run failed");
-    ESP_RETURN_ON_ERROR(draw_health_row(row_y0 + row_h * 7, "NEXT", next_buf, muted, text),
+
+    ESP_RETURN_ON_ERROR(draw_health_row(right_x, col_y0 + col_row_h * 0, col_w, "下次", next_buf, muted, text),
                         TAG, "draw next failed");
-    ESP_RETURN_ON_ERROR(draw_health_row(row_y0 + row_h * 8, "WEATHER", weather_buf, muted, text),
+    ESP_RETURN_ON_ERROR(draw_health_row(right_x, col_y0 + col_row_h * 1, col_w, "天气", weather_buf, muted, text),
                         TAG, "draw weather age failed");
-    ESP_RETURN_ON_ERROR(draw_health_row(row_y0 + row_h * 9, "KOMARI", komari_buf, muted, text),
+    ESP_RETURN_ON_ERROR(draw_health_row(right_x, col_y0 + col_row_h * 2, col_w, "监控", komari_buf, muted, text),
                         TAG, "draw komari age failed");
-    ESP_RETURN_ON_ERROR(draw_health_row(row_y0 + row_h * 10, "VER", version_buf, muted, text),
+    ESP_RETURN_ON_ERROR(draw_health_row(right_x, col_y0 + col_row_h * 3, col_w, "版本", version_buf, muted, text),
                         TAG, "draw version failed");
-    ESP_RETURN_ON_ERROR(draw_health_row(row_y0 + row_h * 11, "OTA", ota_buf, muted,
+    ESP_RETURN_ON_ERROR(draw_health_row(right_x, col_y0 + col_row_h * 4, col_w, "更新", ota_buf, muted,
                                         ota.status == OTA_STATUS_FAILED ? warning : text),
                         TAG, "draw ota state failed");
 
