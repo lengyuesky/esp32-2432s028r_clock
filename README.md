@@ -128,10 +128,12 @@ ota_1: 0x1a0000 0x180000
 
 仓库包含 `.github/workflows/build-ota.yml`，会使用 ESP-IDF v5.4.2 构建 OTA 镜像。
 
-- `push` 到 `main` 会构建固件，上传 Actions artifact，并更新 `ota-latest` 滚动 Release；该 Release 会被标记为 GitHub Latest。
+- `push` 到 `main` 会构建固件，上传 Actions artifact，并创建新的 `ota-时间-提交号` Release；该 Release 会被标记为 GitHub Latest。
+- 工作流会同步更新 `ota-latest` 兼容 Release，供已经使用默认固定 OTA 地址的设备继续更新。
+- 自动 OTA Release 最多保留 3 个：`ota-latest` 加最近 2 个归档 Release；手工创建的普通版本 Release 不会被清理。
 - `pull_request` 和手动 `workflow_dispatch` 会构建固件，并把 `cyd_clock.bin`、`cyd_clock.bin.sha256`、`partition-table.bin`、`ota_data_initial.bin` 上传为 Actions artifact。
 - 发布普通 GitHub Release 时，会再次构建并把 `cyd_clock.bin` 和 `cyd_clock.bin.sha256` 上传到该 Release 的资产中。
-- 固件默认 OTA 地址使用 `releases/download/ota-latest/cyd_clock.bin`，因此 `main` 每次推送成功后，设备默认会拉取滚动 Release 的最新资产。
+- 固件默认 OTA 地址使用 `releases/download/ota-latest/cyd_clock.bin`，因此 `main` 每次推送成功后，设备默认会拉取兼容 Release 的最新资产。
 
 当前 Release 页面：
 
@@ -242,7 +244,7 @@ ESP-IDF 已经会并行编译。WSL 下最大的影响通常是项目位于 Wind
 
 ### Release 页面没有 OTA 镜像或不是最新
 
-`main` 分支 push 会构建镜像并更新 `ota-latest` 滚动 Release。如果 Release 页面没有新镜像，先检查最近一次 `Build OTA firmware` 工作流是否成功。
+`main` 分支 push 会构建镜像，创建新的 GitHub Latest Release，并同步更新 `ota-latest` 兼容 Release。如果 Release 页面没有新镜像，先检查最近一次 `Build OTA firmware` 工作流是否成功。
 
 如果设备使用默认 OTA 地址，请确认最新 Release 中存在 `cyd_clock.bin`：
 

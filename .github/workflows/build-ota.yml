@@ -55,51 +55,93 @@ jobs:
             ota/partition-table.bin
             ota/ota_data_initial.bin
 
-      - name: Publish OTA image to rolling release
+      - name: Publish OTA images to releases
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ota-latest
+          ROLLING_RELEASE_TAG: ota-latest
+          MAX_MANAGED_RELEASES: 3
         shell: bash
         run: |
           set -euo pipefail
           short_sha="${GITHUB_SHA::7}"
+          release_stamp="$(date -u '+%Y%m%d-%H%M%S')"
           built_at="$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+          archive_tag="ota-${release_stamp}-${short_sha}"
+          archive_keep=$((MAX_MANAGED_RELEASES - 1))
+          if (( archive_keep < 0 )); then
+            archive_keep=0
+          fi
+
           cat > ota/release-notes.md <<EOF
           Automated OTA build from main.
 
           Commit: ${GITHUB_SHA}
           Built: ${built_at}
 
-          OTA URL:
+          Latest release OTA URL:
           https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/cyd_clock.bin
+
+          This release OTA URL:
+          https://github.com/${GITHUB_REPOSITORY}/releases/download/${archive_tag}/cyd_clock.bin
+
+          Compatibility OTA URL:
+          https://github.com/${GITHUB_REPOSITORY}/releases/download/${ROLLING_RELEASE_TAG}/cyd_clock.bin
+          EOF
+
+          gh release create "${archive_tag}" \
+            ota/cyd_clock.bin \
+            ota/cyd_clock.bin.sha256 \
+            ota/partition-table.bin \
+            ota/ota_data_initial.bin \
+            --target "${GITHUB_SHA}" \
+            --title "CYD Clock OTA ${release_stamp} (${short_sha})" \
+            --notes-file ota/release-notes.md \
+            --latest
+
+          cat > ota/rolling-release-notes.md <<EOF
+          Rolling OTA compatibility release.
+
+          Commit: ${GITHUB_SHA}
+          Built: ${built_at}
+
+          OTA URL:
+          https://github.com/${GITHUB_REPOSITORY}/releases/download/${ROLLING_RELEASE_TAG}/cyd_clock.bin
           EOF
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -f "${RELEASE_TAG}" "${GITHUB_SHA}"
-          git push origin "refs/tags/${RELEASE_TAG}" --force
+          git tag -f "${ROLLING_RELEASE_TAG}" "${GITHUB_SHA}"
+          git push origin "refs/tags/${ROLLING_RELEASE_TAG}" --force
 
-          if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
-            gh release edit "${RELEASE_TAG}" \
+          if gh release view "${ROLLING_RELEASE_TAG}" >/dev/null 2>&1; then
+            gh release edit "${ROLLING_RELEASE_TAG}" \
               --target "${GITHUB_SHA}" \
               --title "CYD Clock OTA latest (${short_sha})" \
-              --notes-file ota/release-notes.md \
-              --latest
+              --notes-file ota/rolling-release-notes.md
           else
-            gh release create "${RELEASE_TAG}" \
+            gh release create "${ROLLING_RELEASE_TAG}" \
               --target "${GITHUB_SHA}" \
               --title "CYD Clock OTA latest (${short_sha})" \
-              --notes-file ota/release-notes.md \
-              --latest
+              --notes-file ota/rolling-release-notes.md
           fi
 
-          gh release upload "${RELEASE_TAG}" \
+          gh release upload "${ROLLING_RELEASE_TAG}" \
             ota/cyd_clock.bin \
             ota/cyd_clock.bin.sha256 \
             ota/partition-table.bin \
             ota/ota_data_initial.bin \
             --clobber
+
+          gh release edit "${archive_tag}" --latest
+
+          mapfile -t stale_tags < <(
+            gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+              --jq "[.[] | select(.tag_name | startswith(\"ota-\")) | select(.tag_name != \"${ROLLING_RELEASE_TAG}\")] | sort_by(.created_at) | reverse | .[${archive_keep}:][] | .tag_name"
+          )
+          for stale_tag in "${stale_tags[@]}"; do
+            gh release delete "${stale_tag}" --yes --cleanup-tag
+          done
 
       - name: Upload OTA image to release
         if: github.event_name == 'release'
