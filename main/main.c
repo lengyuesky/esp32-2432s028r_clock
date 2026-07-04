@@ -1067,6 +1067,28 @@ static const zh16_glyph_t zh16_glyphs[] = {
     {"云", {0x0000, 0x1FF8, 0x0000, 0x0000, 0x0000, 0x7FFE, 0x7FFE, 0x0300, 0x0200, 0x0420, 0x0C30, 0x1818, 0x3FFC, 0x1804, 0x0000, 0x0000}},
     {"雷", {0x3FFC, 0x0180, 0x7FFE, 0x4182, 0x5DBA, 0x0180, 0x1DB8, 0x0000, 0x1FF8, 0x1188, 0x1FF8, 0x1188, 0x1188, 0x1FF8, 0x1008, 0x0000}},
     {"气", {0x0C00, 0x0800, 0x1FFC, 0x3000, 0x2FF8, 0x6000, 0x0000, 0x3FF0, 0x0010, 0x0010, 0x0010, 0x001A, 0x000A, 0x000E, 0x0000, 0x0000}},
+    {"更", {0x7FFE, 0x0180, 0x0180, 0x3FFC, 0x3184, 0x3FFC, 0x3184, 0x3184, 0x3FFC, 0x1100, 0x1900, 0x0F00, 0x0600, 0x1DE0, 0x703E, 0x0000}},
+    {"新", {0x0800, 0x081E, 0x7F70, 0x2240, 0x2240, 0x1440, 0x7F7E, 0x084C, 0x084C, 0x7F4C, 0x184C, 0x1CCC, 0x2B8C, 0x488C, 0x090C, 0x090C}},
+    {"正", {0x0000, 0x7FFE, 0x0080, 0x0080, 0x0080, 0x1080, 0x10FC, 0x1080, 0x1080, 0x1080, 0x1080, 0x1080, 0x1080, 0x7FFE, 0x0000, 0x0000}},
+    {"在", {0x0200, 0x0200, 0x0200, 0x7FFE, 0x0400, 0x0820, 0x1820, 0x1020, 0x33FC, 0x5020, 0x1020, 0x1020, 0x1020, 0x1020, 0x17FE, 0x0000}},
+    {"下", {0x7FFE, 0x0100, 0x0100, 0x0100, 0x01C0, 0x0170, 0x0118, 0x010C, 0x0100, 0x0100, 0x0100, 0x0100, 0x0100, 0x0100, 0x0000, 0x0000}},
+    {"载", {0x0428, 0x3FA4, 0x0420, 0x7FFE, 0x0820, 0x0824, 0x7FA4, 0x1024, 0x2428, 0x3FB8, 0x0418, 0x0492, 0x7FB2, 0x046A, 0x04CE, 0x0000}},
+    {"完", {0x0180, 0x0180, 0x7FFE, 0x4006, 0x4006, 0x0FF0, 0x0000, 0x0000, 0x7FFE, 0x0440, 0x0440, 0x0C40, 0x0842, 0x1842, 0x707E, 0x4000}},
+    {"成", {0x004C, 0x0044, 0x3FFE, 0x2040, 0x2040, 0x2044, 0x3E4C, 0x2268, 0x2238, 0x2230, 0x2232, 0x2E72, 0x60D2, 0x419A, 0x410E, 0x0000}},
+    {"失", {0x0180, 0x1980, 0x1180, 0x1FFC, 0x3180, 0x2180, 0x4180, 0x0100, 0x7FFE, 0x0180, 0x03C0, 0x0240, 0x0420, 0x1C18, 0x700E, 0x4002}},
+    {"败", {0x0020, 0x7E20, 0x4240, 0x4A7E, 0x4A44, 0x4A84, 0x4AC4, 0x4AC8, 0x4A48, 0x4A28, 0x4A38, 0x1010, 0x1438, 0x366C, 0x62C6, 0x4082}},
+    {"开", {0x7FFE, 0x0430, 0x0430, 0x0430, 0x0430, 0x0430, 0x7FFE, 0x0430, 0x0C30, 0x0830, 0x0830, 0x1830, 0x3030, 0x6030, 0x0030, 0x0000}},
+    {"始", {0x1020, 0x1020, 0x1060, 0x1048, 0x7E44, 0x2686, 0x25FE, 0x2403, 0x6400, 0x64FE, 0x7886, 0x0886, 0x1C86, 0x3286, 0x60FE, 0x4086}},
+    {"重", {0x0018, 0x3FE0, 0x0180, 0x7FFE, 0x0180, 0x1FFC, 0x118C, 0x1FFC, 0x118C, 0x118C, 0x1FFC, 0x0180, 0x3FFC, 0x0180, 0x7FFE, 0x0000}},
+    {"试", {0x0010, 0x3014, 0x1812, 0x0810, 0x03FE, 0x0010, 0x7010, 0x1010, 0x13D0, 0x1090, 0x1098, 0x1098, 0x14AA, 0x1FCA, 0x320E, 0x0004}},
+    {"返", {0x63FE, 0x3200, 0x1200, 0x0200, 0x03FC, 0x0284, 0x72C8, 0x1258, 0x1270, 0x1630, 0x14D8, 0x1586, 0x6800, 0x47FE, 0x0000, 0x0000}},
+    {"回", {0x7FFE, 0x6006, 0x6006, 0x6006, 0x67E6, 0x6426, 0x6426, 0x6426, 0x6426, 0x67E6, 0x6006, 0x6006, 0x6006, 0x7FFE, 0x6006, 0x0000}},
+    {"准", {0x0010, 0x0190, 0x6110, 0x3310, 0x13FE, 0x0620, 0x0E20, 0x03FE, 0x0220, 0x1220, 0x33FE, 0x2220, 0x6220, 0x4220, 0x03FE, 0x0200}},
+    {"备", {0x0200, 0x0600, 0x0FF8, 0x1C30, 0x7660, 0x0180, 0x0E78, 0x700E, 0x1FF8, 0x1188, 0x1188, 0x1FF8, 0x1188, 0x1188, 0x1FF8, 0x1008}},
+    {"等", {0x1040, 0x3040, 0x3FFE, 0x6990, 0x4180, 0x3FFC, 0x0180, 0x0180, 0x7FFE, 0x0010, 0x0010, 0x7FFE, 0x0810, 0x0410, 0x0210, 0x00F0}},
+    {"待", {0x1020, 0x33FE, 0x6020, 0x4820, 0x1820, 0x17FE, 0x3008, 0x7008, 0x57FE, 0x1008, 0x1108, 0x1088, 0x10C8, 0x1008, 0x1038, 0x0000}},
+    {"来", {0x0180, 0x0180, 0x3FFC, 0x0180, 0x1988, 0x0998, 0x0990, 0x0990, 0x7FFE, 0x03C0, 0x07E0, 0x0DB0, 0x1998, 0x318C, 0x4182, 0x0180}},
+    {"源", {0x37FE, 0x1E30, 0x0620, 0x07FE, 0x4786, 0x37FE, 0x0786, 0x0586, 0x15FE, 0x1430, 0x14B4, 0x25B6, 0x2D32, 0x6B32, 0x0860, 0x0000}},
 };
 
 static const uint8_t *font_for_char(char ch)
@@ -5855,8 +5877,9 @@ static esp_err_t draw_health_screen(const struct tm *tm)
                                             HEALTH_OTA_HIT_W, HEALTH_OTA_HIT_H,
                                             6, button_bg),
                         TAG, "draw health ota button failed");
-    ESP_RETURN_ON_ERROR(draw_text5_centered(HEALTH_OTA_HIT_X + HEALTH_OTA_HIT_W / 2,
-                                            HEALTH_OTA_HIT_Y + 8, "UPDATE", 1, button_text),
+    ESP_RETURN_ON_ERROR(draw_text_mixed_centered_limited(HEALTH_OTA_HIT_X + HEALTH_OTA_HIT_W / 2,
+                                                         HEALTH_OTA_HIT_Y + 4, "更新",
+                                                         HEALTH_OTA_HIT_W - 10, 1, button_text),
                         TAG, "draw health ota button text failed");
     return lcd_canvas_flush();
 }
@@ -5866,13 +5889,13 @@ static void ota_format_source_label(const char *url, char *out, size_t out_len)
     if (out == NULL || out_len == 0) {
         return;
     }
-    strlcpy(out, "SRC DEFAULT", out_len);
+    strlcpy(out, "来源 OTA", out_len);
     if (url == NULL || url[0] == '\0') {
         return;
     }
 
-    if (strstr(url, "github.com/") != NULL && strstr(url, "/releases/latest/") != NULL) {
-        strlcpy(out, "SRC LATEST RELEASE", out_len);
+    if (strstr(url, "github.com/") != NULL) {
+        strlcpy(out, "来源 GitHub", out_len);
         return;
     }
 
@@ -5889,7 +5912,7 @@ static void ota_format_source_label(const char *url, char *out, size_t out_len)
     }
     memcpy(host_buf, host, host_len);
     host_buf[host_len] = '\0';
-    snprintf(out, out_len, "SRC %s", host_buf);
+    snprintf(out, out_len, "来源 %s", host_buf);
 }
 
 static void ota_format_size_label(const ota_info_t *ota, char *out, size_t out_len)
@@ -5897,7 +5920,7 @@ static void ota_format_size_label(const ota_info_t *ota, char *out, size_t out_l
     if (out == NULL || out_len == 0) {
         return;
     }
-    strlcpy(out, "WAIT", out_len);
+    strlcpy(out, "等待", out_len);
     if (ota == NULL || ota->image_read <= 0) {
         return;
     }
@@ -5956,47 +5979,45 @@ static esp_err_t draw_ota_confirm_screen(const struct tm *tm)
     char status_buf[48];
     char size_buf[24];
     char percent_buf[16];
-    const char *title = "OTA UPDATE";
-    const char *left_button = "START";
+    const char *title = "OTA更新";
+    const char *left_button = "开始";
     bool show_buttons = true;
 
     ota_get_snapshot(&ota);
     (void)ota_get_effective_url(url, sizeof(url));
     ota_format_source_label(url, source_buf, sizeof(source_buf));
     ota_format_size_label(&ota, size_buf, sizeof(size_buf));
-    strlcpy(status_buf, "READY", sizeof(status_buf));
+    strlcpy(status_buf, "准备更新", sizeof(status_buf));
     percent_buf[0] = '\0';
 
     if (ota.status == OTA_STATUS_RUNNING) {
-        title = "OTA DOWNLOAD";
+        title = "正在下载";
         show_buttons = false;
         if (ota.progress_percent >= 0) {
-            snprintf(status_buf, sizeof(status_buf), "DOWNLOADING %d%%", ota.progress_percent);
+            snprintf(status_buf, sizeof(status_buf), "下载中 %d%%", ota.progress_percent);
             snprintf(percent_buf, sizeof(percent_buf), "%d%%", ota.progress_percent);
         } else {
-            strlcpy(status_buf, ota.message[0] != '\0' ? ota.message : "DOWNLOADING",
-                    sizeof(status_buf));
+            strlcpy(status_buf, "连接中", sizeof(status_buf));
             strlcpy(percent_buf, "--", sizeof(percent_buf));
         }
     } else if (ota.status == OTA_STATUS_SUCCESS) {
-        title = "OTA DONE";
+        title = "更新完成";
         show_buttons = false;
-        strlcpy(status_buf, "REBOOTING", sizeof(status_buf));
+        strlcpy(status_buf, "重启中", sizeof(status_buf));
         strlcpy(percent_buf, "100%", sizeof(percent_buf));
     } else if (ota.status == OTA_STATUS_FAILED) {
-        title = "OTA FAILED";
-        left_button = "RETRY";
+        title = "更新失败";
+        left_button = "重试";
         if (ota.last_error != ESP_OK) {
-            strlcpy(status_buf, esp_err_to_name(ota.last_error), sizeof(status_buf));
+            snprintf(status_buf, sizeof(status_buf), "失败 %s", esp_err_to_name(ota.last_error));
         } else {
-            strlcpy(status_buf, ota.message[0] != '\0' ? ota.message : "FAILED",
-                    sizeof(status_buf));
+            strlcpy(status_buf, "更新失败", sizeof(status_buf));
         }
     }
 
     ESP_RETURN_ON_ERROR(draw_view_background(rgb565(5, 8, 22), rgb565(12, 18, 34)),
                         TAG, "draw ota confirm bg failed");
-    ESP_RETURN_ON_ERROR(draw_view_header("OTA", tm), TAG, "draw ota confirm header failed");
+    ESP_RETURN_ON_ERROR(draw_view_header("更新", tm), TAG, "draw ota confirm header failed");
 
     ESP_RETURN_ON_ERROR(lcd_fill_round_rect(OTA_CONFIRM_BOX_X, OTA_CONFIRM_BOX_Y,
                                             OTA_CONFIRM_BOX_W, OTA_CONFIRM_BOX_H, 8, border),
@@ -6004,15 +6025,15 @@ static esp_err_t draw_ota_confirm_screen(const struct tm *tm)
     ESP_RETURN_ON_ERROR(lcd_fill_round_rect(OTA_CONFIRM_BOX_X + 2, OTA_CONFIRM_BOX_Y + 2,
                                             OTA_CONFIRM_BOX_W - 4, OTA_CONFIRM_BOX_H - 4, 7, box),
                         TAG, "draw ota confirm box failed");
-    ESP_RETURN_ON_ERROR(draw_text5_centered(160, OTA_CONFIRM_BOX_Y + 22,
-                                            title, 1, text),
+    ESP_RETURN_ON_ERROR(draw_text_mixed_centered_limited(160, OTA_CONFIRM_BOX_Y + 18,
+                                                         title, OTA_CONFIRM_BOX_W - 36, 1, text),
                         TAG, "draw ota confirm title failed");
-    ESP_RETURN_ON_ERROR(draw_text5_limited(OTA_CONFIRM_BOX_X + 18, OTA_CONFIRM_BOX_Y + 43,
-                                           status_buf, 34, 1,
-                                           ota.status == OTA_STATUS_FAILED ? accent : muted),
+    ESP_RETURN_ON_ERROR(draw_text_mixed_limited(OTA_CONFIRM_BOX_X + 18, OTA_CONFIRM_BOX_Y + 43,
+                                                status_buf, OTA_CONFIRM_BOX_W - 36, 1,
+                                                ota.status == OTA_STATUS_FAILED ? accent : muted),
                         TAG, "draw ota status failed");
-    ESP_RETURN_ON_ERROR(draw_text5_limited(OTA_CONFIRM_BOX_X + 18, OTA_CONFIRM_BOX_Y + 61,
-                                           source_buf, 34, 1, muted),
+    ESP_RETURN_ON_ERROR(draw_text_mixed_limited(OTA_CONFIRM_BOX_X + 18, OTA_CONFIRM_BOX_Y + 61,
+                                                source_buf, OTA_CONFIRM_BOX_W - 36, 1, muted),
                         TAG, "draw ota source failed");
 
     if (ota.status == OTA_STATUS_RUNNING || ota.status == OTA_STATUS_SUCCESS) {
@@ -6029,12 +6050,13 @@ static esp_err_t draw_ota_confirm_screen(const struct tm *tm)
                                            progress_fill),
                                 TAG, "draw ota percent failed");
         }
-        ESP_RETURN_ON_ERROR(draw_text5_limited(OTA_CONFIRM_BOX_X + 18, OTA_CONFIRM_BOX_Y + 96,
-                                               size_buf, 24, 1, text),
+        ESP_RETURN_ON_ERROR(draw_text_mixed_limited(OTA_CONFIRM_BOX_X + 18, OTA_CONFIRM_BOX_Y + 96,
+                                                    size_buf, OTA_CONFIRM_BOX_W - 36, 1, text),
                             TAG, "draw ota size failed");
     } else {
-        ESP_RETURN_ON_ERROR(draw_text5_centered(160, OTA_CONFIRM_BOX_Y + 82,
-                                                "HTTPS ONLY", 1, muted),
+        ESP_RETURN_ON_ERROR(draw_text_mixed_centered_limited(160, OTA_CONFIRM_BOX_Y + 80,
+                                                             "下载重启",
+                                                             OTA_CONFIRM_BOX_W - 36, 1, muted),
                             TAG, "draw ota confirm body failed");
     }
 
@@ -6047,11 +6069,13 @@ static esp_err_t draw_ota_confirm_screen(const struct tm *tm)
                                                 OTA_CONFIRM_BUTTON_W, OTA_CONFIRM_BUTTON_H,
                                                 6, no_bg),
                             TAG, "draw ota no button failed");
-        ESP_RETURN_ON_ERROR(draw_text5_centered(OTA_CONFIRM_YES_X + OTA_CONFIRM_BUTTON_W / 2,
-                                                OTA_CONFIRM_YES_Y + 8, left_button, 1, dark),
+        ESP_RETURN_ON_ERROR(draw_text_mixed_centered_limited(OTA_CONFIRM_YES_X + OTA_CONFIRM_BUTTON_W / 2,
+                                                             OTA_CONFIRM_YES_Y + 5, left_button,
+                                                             OTA_CONFIRM_BUTTON_W - 12, 1, dark),
                             TAG, "draw ota yes text failed");
-        ESP_RETURN_ON_ERROR(draw_text5_centered(OTA_CONFIRM_NO_X + OTA_CONFIRM_BUTTON_W / 2,
-                                                OTA_CONFIRM_NO_Y + 8, "BACK", 1, accent),
+        ESP_RETURN_ON_ERROR(draw_text_mixed_centered_limited(OTA_CONFIRM_NO_X + OTA_CONFIRM_BUTTON_W / 2,
+                                                             OTA_CONFIRM_NO_Y + 5, "返回",
+                                                             OTA_CONFIRM_BUTTON_W - 12, 1, accent),
                             TAG, "draw ota no text failed");
     }
     return lcd_canvas_flush();

@@ -18,7 +18,7 @@
   - 点日期区域或底部“日期”进入日历；配置 Komari 后底部会隐藏日期状态栏以避免拥挤。
   - 点右上角天气进入未来 24 小时逐小时天气页，点右半屏/左半屏翻页。
   - 点底部“湿度”进入天气详情。
-  - 点健康状态区域进入健康状态页，在健康状态页点击 `UPDATE` 可确认并启动 OTA。
+  - 点健康状态区域进入健康状态页，在健康状态页点击 `更新` 可确认并启动 OTA。
   - 配置 Komari 后点底部 `KOMARI` 进入 Komari 详情页。
   - 多数子页面点击空白区域返回首页。
 - 内置轻量 5x7 ASCII 字体和少量 16x16 中文字模，不依赖外部字体文件。
@@ -110,7 +110,7 @@ idf.py -p COM3 flash monitor
 https://github.com/lengyuesky/esp32-2432s028r_clock/releases/download/ota-latest/cyd_clock.bin
 ```
 
-进入健康状态页后点击 `UPDATE`，确认后设备会从当前 OTA 地址下载 `cyd_clock.bin`，写入备用 OTA 分区并重启。默认分区表包含两个 0x180000 大小的 OTA 应用分区：
+进入健康状态页后点击 `更新`，确认后设备会从当前 OTA 地址下载 `cyd_clock.bin`，写入备用 OTA 分区并重启。默认分区表包含两个 0x180000 大小的 OTA 应用分区：
 
 ```text
 ota_0: 0x20000  0x180000
