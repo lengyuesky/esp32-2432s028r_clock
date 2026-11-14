@@ -50,6 +50,8 @@
 #define LCD_V_RES 240
 #define LCD_DRAW_LINES 16
 #define LCD_SPI_CLOCK_HZ (40 * 1000 * 1000)
+#define DEG_CHAR '^'
+#define DEG_SIGN "^"
 #define CLOCK_PANEL_X 12
 #define CLOCK_PANEL_Y 20
 #define CLOCK_PANEL_W 296
@@ -115,9 +117,9 @@
 #define DASHBOARD_WEATHER_HIT_Y (CLOCK_PANEL_Y + 7)
 #define DASHBOARD_WEATHER_HIT_W 72
 #define DASHBOARD_WEATHER_HIT_H 47
-#define HEALTH_STATUS_HIT_X (CLOCK_PANEL_X + 170)
+#define HEALTH_STATUS_HIT_X (CLOCK_PANEL_X + 214)
 #define HEALTH_STATUS_HIT_Y (CLOCK_PANEL_Y + 112)
-#define HEALTH_STATUS_HIT_W 124
+#define HEALTH_STATUS_HIT_W 82
 #define HEALTH_STATUS_HIT_H 42
 #define WIFI_STATUS_HIT_X (CLOCK_PANEL_X + 8)
 #define WIFI_STATUS_HIT_Y (CLOCK_PANEL_Y + 5)
@@ -777,20 +779,6 @@ static esp_err_t lcd_fill_gradient_rect(int x, int y, int w, int h, uint16_t top
     return ESP_OK;
 }
 
-static esp_err_t lcd_fill_vertical_blend_rect(int x, int y, int w, int h, uint16_t top, uint16_t bottom)
-{
-    if (w <= 0 || h <= 0) {
-        return ESP_OK;
-    }
-
-    int den = h > 1 ? h - 1 : 1;
-    for (int row = 0; row < h; ++row) {
-        uint16_t color = mix_color(top, bottom, row, den);
-        ESP_RETURN_ON_ERROR(lcd_fill_rect(x, y + row, w, 1, color), TAG, "fill blend rect failed");
-    }
-    return ESP_OK;
-}
-
 static esp_err_t lcd_canvas_begin(int x, int y, int w, int h)
 {
     ESP_RETURN_ON_FALSE(s_lcd.canvas_buf != NULL, ESP_ERR_INVALID_STATE, TAG, "LCD canvas buffer is unavailable");
@@ -1006,6 +994,16 @@ static esp_err_t lcd_fill_triangle(int x0, int y0, int x1, int y1, int x2, int y
 
 static esp_err_t lcd_fill_round_rect(int x, int y, int w, int h, int radius, uint16_t color)
 {
+    // 半径超过短边一半时会让圆角越界 1 像素，这里统一收紧。
+    if (radius * 2 > h - 1) {
+        radius = (h - 1) / 2;
+    }
+    if (radius * 2 > w - 1) {
+        radius = (w - 1) / 2;
+    }
+    if (radius < 0) {
+        radius = 0;
+    }
     ESP_RETURN_ON_ERROR(lcd_fill_rect(x + radius, y, w - 2 * radius, h, color), TAG,
                         "round rect body failed");
     ESP_RETURN_ON_ERROR(lcd_fill_rect(x, y + radius, radius, h - 2 * radius, color), TAG,
@@ -1189,8 +1187,23 @@ static esp_err_t draw_char5(int x, int y, char ch, int scale, uint16_t color)
                             "draw colon failed");
         return lcd_fill_rect(x + 2 * scale, y + 5 * scale, scale, scale, color);
     }
-    if (ch == '-' || ch == '/') {
+    if (ch == '-') {
         return lcd_fill_rect(x + scale, y + 3 * scale, 3 * scale, scale, color);
+    }
+    if (ch == '/') {
+        for (int i = 0; i < 5; ++i) {
+            ESP_RETURN_ON_ERROR(lcd_fill_rect(x + (4 - i) * scale, y + (1 + i) * scale,
+                                              scale, scale, color), TAG, "draw slash failed");
+        }
+        return ESP_OK;
+    }
+    if (ch == DEG_CHAR) {
+        // 5x7 字体没有度数符号，用左上角的小方环代替。
+        ESP_RETURN_ON_ERROR(lcd_fill_rect(x + scale, y, 3 * scale, scale, color), TAG, "draw degree failed");
+        ESP_RETURN_ON_ERROR(lcd_fill_rect(x + scale, y + 2 * scale, 3 * scale, scale, color), TAG,
+                            "draw degree failed");
+        ESP_RETURN_ON_ERROR(lcd_fill_rect(x + scale, y + scale, scale, scale, color), TAG, "draw degree failed");
+        return lcd_fill_rect(x + 3 * scale, y + scale, scale, scale, color);
     }
     if (ch == '+') {
         ESP_RETURN_ON_ERROR(lcd_fill_rect(x + scale, y + 3 * scale, 3 * scale, scale, color), TAG,
@@ -1198,13 +1211,24 @@ static esp_err_t draw_char5(int x, int y, char ch, int scale, uint16_t color)
         return lcd_fill_rect(x + 2 * scale, y + 2 * scale, scale, 3 * scale, color);
     }
     if (ch == '%') {
-        ESP_RETURN_ON_ERROR(lcd_fill_rect(x, y + scale, scale, scale, color), TAG,
-                            "draw percent failed");
-        ESP_RETURN_ON_ERROR(lcd_fill_rect(x + 4 * scale, y + 5 * scale, scale, scale, color), TAG,
+        ESP_RETURN_ON_ERROR(lcd_fill_rect(x, y, 2 * scale, 2 * scale, color), TAG, "draw percent failed");
+        ESP_RETURN_ON_ERROR(lcd_fill_rect(x + 3 * scale, y + 5 * scale, 2 * scale, 2 * scale, color), TAG,
                             "draw percent failed");
         for (int i = 0; i < 5; ++i) {
             ESP_RETURN_ON_ERROR(lcd_fill_rect(x + (4 - i) * scale, y + (1 + i) * scale,
                                               scale, scale, color), TAG, "draw percent failed");
+        }
+        return ESP_OK;
+    }
+    if (ch == '?') {
+        static const uint8_t question[5] = {0x02, 0x01, 0x51, 0x09, 0x06};
+        for (int col = 0; col < 5; ++col) {
+            for (int row = 0; row < 7; ++row) {
+                if ((question[col] >> row) & 0x01) {
+                    ESP_RETURN_ON_ERROR(lcd_fill_rect(x + col * scale, y + row * scale, scale, scale, color),
+                                        TAG, "draw question failed");
+                }
+            }
         }
         return ESP_OK;
     }
@@ -1383,65 +1407,253 @@ static esp_err_t draw_text5_centered(int center_x, int y, const char *text, int 
     return draw_text5(center_x - text5_width(text, scale) / 2, y, text, scale, color);
 }
 
+#define SEG_DIGIT_W 40
+#define SEG_DIGIT_H 58
+#define SEG_THICK 8
+#define SEG_DIGIT_GAP 10
+#define SEG_COLON_W 10
+#define SEG_COLON_GAP 10
+#define DASHBOARD_TIME_Y (CLOCK_PANEL_Y + 50)
+
+typedef struct {
+    int y0;
+    int h;
+    uint16_t top;
+    uint16_t bottom;
+} seg_shade_t;
+
+static uint16_t seg_shade_color(const seg_shade_t *shade, int y)
+{
+    int pos = y - shade->y0;
+    if (pos < 0) {
+        pos = 0;
+    } else if (pos > shade->h - 1) {
+        pos = shade->h - 1;
+    }
+    return mix_color(shade->top, shade->bottom, pos, shade->h > 1 ? shade->h - 1 : 1);
+}
+
+// 横向段：两端削成尖角，和竖向段在拐角处斜接，形成数码管风格的六边形笔画。
+static esp_err_t draw_seg_horizontal(int x0, int x1, int y, int thick, const seg_shade_t *shade)
+{
+    for (int r = 0; r < thick; ++r) {
+        int inset = abs(2 * r - (thick - 1)) / 2 + 1;
+        int w = (x1 - x0) - inset * 2;
+        if (w > 0) {
+            ESP_RETURN_ON_ERROR(lcd_fill_rect(x0 + inset, y + r, w, 1, seg_shade_color(shade, y + r)),
+                                TAG, "draw seg row failed");
+        }
+    }
+    return ESP_OK;
+}
+
+static esp_err_t draw_seg_vertical(int x, int y0, int y1, int thick, const seg_shade_t *shade)
+{
+    const int half = thick / 2;
+    for (int y = y0 + 1; y < y1 - 1; ++y) {
+        int d = y - y0;
+        if (y1 - 1 - y < d) {
+            d = y1 - 1 - y;
+        }
+        int inset = half - d;
+        if (inset < 0) {
+            inset = 0;
+        }
+        int w = thick - inset * 2;
+        if (w > 0) {
+            ESP_RETURN_ON_ERROR(lcd_fill_rect(x + inset, y, w, 1, seg_shade_color(shade, y)),
+                                TAG, "draw seg col failed");
+        }
+    }
+    return ESP_OK;
+}
+
+static esp_err_t draw_seg_digit(int x, int y, int digit, bool unlit,
+                                const seg_shade_t *shade)
+{
+    // bit0..bit6 依次为 a b c d e f g 段。
+    static const uint8_t digit_segments[10] = {
+        0x3F, 0x06, 0x5B, 0x4F, 0x66, 0x6D, 0x7D, 0x07, 0x7F, 0x6F,
+    };
+    const int w = SEG_DIGIT_W;
+    const int h = SEG_DIGIT_H;
+    const int t = SEG_THICK;
+    const int mid = y + h / 2;
+    uint8_t mask = 0x7F;
+
+    if (digit >= 0 && digit <= 9) {
+        mask = digit_segments[digit];
+    }
+    if (unlit) {
+        mask = (uint8_t)(0x7F & (uint8_t)~mask);
+    }
+
+    if (mask & 0x01) {
+        ESP_RETURN_ON_ERROR(draw_seg_horizontal(x + t / 2, x + w - t / 2, y, t, shade), TAG, "seg a failed");
+    }
+    if (mask & 0x02) {
+        ESP_RETURN_ON_ERROR(draw_seg_vertical(x + w - t, y + t / 2, mid, t, shade), TAG, "seg b failed");
+    }
+    if (mask & 0x04) {
+        ESP_RETURN_ON_ERROR(draw_seg_vertical(x + w - t, mid, y + h - t / 2, t, shade), TAG, "seg c failed");
+    }
+    if (mask & 0x08) {
+        ESP_RETURN_ON_ERROR(draw_seg_horizontal(x + t / 2, x + w - t / 2, y + h - t, t, shade), TAG,
+                            "seg d failed");
+    }
+    if (mask & 0x10) {
+        ESP_RETURN_ON_ERROR(draw_seg_vertical(x, mid, y + h - t / 2, t, shade), TAG, "seg e failed");
+    }
+    if (mask & 0x20) {
+        ESP_RETURN_ON_ERROR(draw_seg_vertical(x, y + t / 2, mid, t, shade), TAG, "seg f failed");
+    }
+    if (mask & 0x40) {
+        ESP_RETURN_ON_ERROR(draw_seg_horizontal(x + t / 2, x + w - t / 2, mid - t / 2, t, shade), TAG,
+                            "seg g failed");
+    }
+    return ESP_OK;
+}
+
+static int dashboard_time_width(void)
+{
+    return SEG_DIGIT_W * 4 + SEG_DIGIT_GAP * 2 + SEG_COLON_GAP * 2 + SEG_COLON_W;
+}
+
+static int dashboard_time_x(void)
+{
+    return 160 - dashboard_time_width() / 2;
+}
+
 static esp_err_t draw_time_digits(const struct tm *tm)
 {
-    char time_buf[8];
-    snprintf(time_buf, sizeof(time_buf), "%02d:%02d", tm->tm_hour, tm->tm_min);
+    const int digits[4] = {tm->tm_hour / 10, tm->tm_hour % 10, tm->tm_min / 10, tm->tm_min % 10};
+    const int y = DASHBOARD_TIME_Y;
+    const int x0 = dashboard_time_x();
+    const seg_shade_t lit = {y, SEG_DIGIT_H, rgb565(236, 250, 255), rgb565(112, 196, 255)};
+    const seg_shade_t ghost = {y, SEG_DIGIT_H, rgb565(16, 26, 62), rgb565(18, 24, 66)};
+    const seg_shade_t shadow = {y, SEG_DIGIT_H, rgb565(2, 4, 14), rgb565(2, 4, 14)};
+    int xs[4];
 
-    const int scale = 7;
-    const int x = 160 - text5_width(time_buf, scale) / 2;
-    const int y = CLOCK_PANEL_Y + 48;
-    ESP_RETURN_ON_ERROR(draw_text5(x + 2, y + 3, time_buf, scale, rgb565(4, 12, 28)),
-                        TAG, "draw time shadow failed");
-    return draw_text5(x, y, time_buf, scale, rgb565(219, 246, 255));
+    xs[0] = x0;
+    xs[1] = xs[0] + SEG_DIGIT_W + SEG_DIGIT_GAP;
+    xs[2] = xs[1] + SEG_DIGIT_W + SEG_COLON_GAP * 2 + SEG_COLON_W;
+    xs[3] = xs[2] + SEG_DIGIT_W + SEG_DIGIT_GAP;
+
+    for (int i = 0; i < 4; ++i) {
+        ESP_RETURN_ON_ERROR(draw_seg_digit(xs[i], y, digits[i], true, &ghost), TAG, "draw ghost digit failed");
+    }
+    for (int i = 0; i < 4; ++i) {
+        ESP_RETURN_ON_ERROR(draw_seg_digit(xs[i] + 2, y + 3, digits[i], false, &shadow),
+                            TAG, "draw digit shadow failed");
+    }
+    for (int i = 0; i < 4; ++i) {
+        ESP_RETURN_ON_ERROR(draw_seg_digit(xs[i], y, digits[i], false, &lit), TAG, "draw digit failed");
+    }
+
+    // 冒号随秒闪烁，偶数秒亮、奇数秒暗。
+    const bool colon_on = (tm->tm_sec % 2) == 0;
+    const int colon_x = xs[1] + SEG_DIGIT_W + SEG_COLON_GAP;
+    const uint16_t colon = colon_on ? rgb565(120, 226, 255) : rgb565(30, 52, 92);
+    ESP_RETURN_ON_ERROR(lcd_fill_round_rect(colon_x, y + SEG_DIGIT_H / 3 - 5, SEG_COLON_W, SEG_COLON_W, 3, colon),
+                        TAG, "draw colon failed");
+    return lcd_fill_round_rect(colon_x, y + (SEG_DIGIT_H * 2) / 3 - 4, SEG_COLON_W, SEG_COLON_W, 3, colon);
 }
 
 static esp_err_t draw_progress_dots(int second)
 {
-    const int cx = 160;
-    const int y = CLOCK_PANEL_Y + CLOCK_PANEL_H - 5;
-    const uint16_t dim = rgb565(42, 50, 80);
-    const uint16_t cyan = rgb565(76, 226, 255);
-    const uint16_t violet = rgb565(139, 89, 255);
-    const uint16_t pink = rgb565(255, 103, 184);
-    const uint16_t colors[] = {cyan, violet, pink};
-    int active = second / 20;
+    // 时间下方的细进度条，表示当前分钟内已走过的秒数。
+    const int x = dashboard_time_x();
+    const int w = dashboard_time_width();
+    const int y = DASHBOARD_TIME_Y + SEG_DIGIT_H + 8;
+    const uint16_t track = rgb565(24, 34, 70);
+    const uint16_t start = rgb565(76, 226, 255);
+    const uint16_t end = rgb565(186, 110, 255);
+    int fill = (w * (second + 1)) / 60;
 
-    for (int i = 0; i < 3; ++i) {
-        uint16_t color = i == active ? colors[i] : dim;
-        ESP_RETURN_ON_ERROR(lcd_fill_circle(cx - 18 + i * 18, y, 3, color),
-                            TAG, "draw progress dot failed");
+    if (second < 0) {
+        fill = 0;
+    } else if (fill > w) {
+        fill = w;
+    }
+
+    ESP_RETURN_ON_ERROR(lcd_fill_rect(x, y, w, 2, track), TAG, "draw seconds track failed");
+    for (int i = 0; i < fill; i += 4) {
+        int seg_w = fill - i < 4 ? fill - i : 4;
+        ESP_RETURN_ON_ERROR(lcd_fill_rect(x + i, y, seg_w, 2, mix_color(start, end, i, w)),
+                            TAG, "draw seconds fill failed");
+    }
+    if (fill > 0) {
+        ESP_RETURN_ON_ERROR(lcd_fill_circle(x + fill - 1, y, 2, mix_color(start, end, fill, w)),
+                            TAG, "draw seconds head failed");
     }
     return ESP_OK;
 }
 
 static esp_err_t draw_panel_frame(void)
 {
-    const uint16_t outer = rgb565(22, 32, 58);
+    const uint16_t outer = rgb565(30, 44, 82);
     const uint16_t inner = rgb565(6, 12, 27);
 
     ESP_RETURN_ON_ERROR(lcd_fill_round_rect(CLOCK_PANEL_X, CLOCK_PANEL_Y,
-                                            CLOCK_PANEL_W, CLOCK_PANEL_H, 9, outer),
+                                            CLOCK_PANEL_W, CLOCK_PANEL_H, 10, outer),
                         TAG, "draw panel outer failed");
     ESP_RETURN_ON_ERROR(lcd_fill_round_rect(CLOCK_PANEL_X + 1, CLOCK_PANEL_Y + 1,
-                                            CLOCK_PANEL_W - 2, CLOCK_PANEL_H - 2, 8, inner),
+                                            CLOCK_PANEL_W - 2, CLOCK_PANEL_H - 2, 9, inner),
                         TAG, "draw panel inner failed");
+    return ESP_OK;
+}
+
+static int panel_row_inset(int row_y)
+{
+    // 面板内层圆角半径为 9，返回该行左右需要内缩的像素，避免渐变覆盖圆角外侧。
+    const int radius = 9;
+    const int top = CLOCK_PANEL_Y + 1;
+    const int bottom = CLOCK_PANEL_Y + CLOCK_PANEL_H - 2;
+    int d = row_y - top;
+    if (bottom - row_y < d) {
+        d = bottom - row_y;
+    }
+    if (d >= radius) {
+        return 0;
+    }
+    int dy = radius - d;
+    return radius - (int)sqrtf((float)(radius * radius - dy * dy));
+}
+
+static esp_err_t lcd_fill_panel_blend_rows(int y, int h, uint16_t top, uint16_t bottom)
+{
+    if (h <= 0) {
+        return ESP_OK;
+    }
+    int den = h > 1 ? h - 1 : 1;
+    for (int row = 0; row < h; ++row) {
+        int inset = panel_row_inset(y + row);
+        ESP_RETURN_ON_ERROR(lcd_fill_rect(CLOCK_PANEL_X + 1 + inset, y + row,
+                                          CLOCK_PANEL_W - 2 - inset * 2, 1,
+                                          mix_color(top, bottom, row, den)),
+                            TAG, "fill panel rows failed");
+    }
     return ESP_OK;
 }
 
 static esp_err_t draw_star_field(void)
 {
+    // 星点只放在时间数字之外的留白处，避免干扰读数。
     static const uint16_t stars[][2] = {
-        {221, 45}, {246, 55}, {286, 65}, {238, 81}, {266, 89},
-        {209, 96}, {281, 105}, {232, 112}, {298, 120}, {255, 128},
+        {36, 62}, {58, 50}, {104, 58}, {214, 56}, {230, 66},
+        {22, 98}, {298, 104}, {28, 130}, {294, 76}, {150, 64},
     };
-    const uint16_t star = rgb565(215, 223, 255);
-    const uint16_t star_dim = rgb565(103, 118, 168);
+    const uint16_t star = rgb565(196, 210, 255);
+    const uint16_t star_dim = rgb565(76, 92, 150);
 
     for (size_t i = 0; i < sizeof(stars) / sizeof(stars[0]); ++i) {
-        int r = (i % 4) == 0 ? 2 : 1;
-        ESP_RETURN_ON_ERROR(lcd_fill_circle(stars[i][0], stars[i][1], r,
-                                            (i % 3) == 0 ? star : star_dim),
+        if ((i % 4) == 0) {
+            ESP_RETURN_ON_ERROR(lcd_fill_rect(stars[i][0] - 1, stars[i][1], 3, 1, star_dim), TAG,
+                                "draw star failed");
+            ESP_RETURN_ON_ERROR(lcd_fill_rect(stars[i][0], stars[i][1] - 1, 1, 3, star_dim), TAG,
+                                "draw star failed");
+        }
+        ESP_RETURN_ON_ERROR(lcd_fill_rect(stars[i][0], stars[i][1], 1, 1, (i % 3) == 0 ? star : star_dim),
                             TAG, "draw star failed");
     }
     return ESP_OK;
@@ -1449,45 +1661,35 @@ static esp_err_t draw_star_field(void)
 
 static esp_err_t draw_scenic_background(void)
 {
-    const uint16_t sky_top = rgb565(4, 7, 24);
-    const uint16_t sky_mid = rgb565(13, 24, 70);
-    const uint16_t lake_top = rgb565(20, 31, 84);
-    const uint16_t lake_bottom = rgb565(4, 11, 31);
-    const uint16_t glow = rgb565(255, 117, 181);
-    const uint16_t moon = rgb565(255, 202, 122);
+    const uint16_t sky_top = rgb565(5, 8, 26);
+    const uint16_t sky_mid = rgb565(14, 22, 62);
+    const uint16_t sky_low = rgb565(24, 24, 74);
+    const uint16_t floor_top = rgb565(10, 14, 38);
+    const uint16_t floor_bottom = rgb565(5, 8, 22);
+    const int hero_h = 150;
 
-    ESP_RETURN_ON_ERROR(lcd_fill_vertical_blend_rect(CLOCK_PANEL_X + 1, CLOCK_PANEL_Y + 1,
-                                                     CLOCK_PANEL_W - 2, 116,
-                                                     sky_top, sky_mid),
+    ESP_RETURN_ON_ERROR(lcd_fill_panel_blend_rows(CLOCK_PANEL_Y + 1, 90, sky_top, sky_mid),
                         TAG, "draw sky failed");
-    ESP_RETURN_ON_ERROR(lcd_fill_vertical_blend_rect(CLOCK_PANEL_X + 1, CLOCK_PANEL_Y + 116,
-                                                     CLOCK_PANEL_W - 2, CLOCK_PANEL_H - 117,
-                                                     lake_top, lake_bottom),
-                        TAG, "draw lake failed");
+    ESP_RETURN_ON_ERROR(lcd_fill_panel_blend_rows(CLOCK_PANEL_Y + 91, hero_h - 91, sky_mid, sky_low),
+                        TAG, "draw sky low failed");
+    ESP_RETURN_ON_ERROR(lcd_fill_panel_blend_rows(CLOCK_PANEL_Y + hero_h, CLOCK_PANEL_H - hero_h - 1,
+                                                  floor_top, floor_bottom),
+                        TAG, "draw floor failed");
     ESP_RETURN_ON_ERROR(draw_star_field(), TAG, "draw stars failed");
 
-    ESP_RETURN_ON_ERROR(lcd_fill_circle(249, 118, 17, rgb565(255, 165, 129)), TAG, "draw sunset failed");
-    ESP_RETURN_ON_ERROR(lcd_fill_circle(249, 118, 13, moon), TAG, "draw sun core failed");
-    ESP_RETURN_ON_ERROR(lcd_fill_triangle(12, 151, 76, 94, 145, 151, rgb565(5, 16, 43)),
-                        TAG, "draw mountain failed");
-    ESP_RETURN_ON_ERROR(lcd_fill_triangle(91, 151, 163, 104, 220, 151, rgb565(12, 29, 78)),
-                        TAG, "draw mountain failed");
-    ESP_RETURN_ON_ERROR(lcd_fill_triangle(174, 151, 251, 109, 310, 151, rgb565(16, 36, 92)),
-                        TAG, "draw mountain failed");
-    ESP_RETURN_ON_ERROR(lcd_fill_triangle(12, 165, 63, 126, 128, 165, rgb565(2, 10, 28)),
-                        TAG, "draw foreground mountain failed");
-    ESP_RETURN_ON_ERROR(lcd_fill_triangle(185, 165, 279, 128, 312, 165, rgb565(3, 13, 33)),
-                        TAG, "draw foreground mountain failed");
-
-    ESP_RETURN_ON_ERROR(lcd_draw_hline(87, 153, 164, rgb565(76, 98, 170)), TAG, "draw horizon failed");
-    ESP_RETURN_ON_ERROR(lcd_draw_hline(87, 154, 164, rgb565(50, 68, 132)), TAG, "draw horizon failed");
-    ESP_RETURN_ON_ERROR(lcd_fill_vertical_blend_rect(130, 155, 92, 8,
-                                                     rgb565(251, 126, 198), rgb565(96, 83, 230)),
-                        TAG, "draw reflection failed");
-    ESP_RETURN_ON_ERROR(lcd_draw_line(118, 166, 231, 166, 1, rgb565(111, 95, 255)),
-                        TAG, "draw lake line failed");
-    ESP_RETURN_ON_ERROR(lcd_draw_line(154, 160, 214, 160, 1, glow), TAG, "draw lake glow failed");
-    return lcd_draw_line(168, 170, 203, 170, 1, rgb565(74, 226, 255));
+    // 地平线发光：中间亮、两端渐隐。
+    const int line_y = CLOCK_PANEL_Y + hero_h;
+    const int half = (CLOCK_PANEL_W - 2) / 2;
+    const uint16_t glow = rgb565(132, 98, 255);
+    for (int i = 0; i < half; i += 2) {
+        uint16_t c = mix_color(glow, floor_top, i, half);
+        ESP_RETURN_ON_ERROR(lcd_fill_rect(160 + i, line_y, 2, 1, c), TAG, "draw horizon failed");
+        ESP_RETURN_ON_ERROR(lcd_fill_rect(160 - i - 2, line_y, 2, 1, c), TAG, "draw horizon failed");
+        uint16_t c2 = mix_color(rgb565(52, 40, 128), sky_low, i, half);
+        ESP_RETURN_ON_ERROR(lcd_fill_rect(160 + i, line_y - 1, 2, 1, c2), TAG, "draw horizon failed");
+        ESP_RETURN_ON_ERROR(lcd_fill_rect(160 - i - 2, line_y - 1, 2, 1, c2), TAG, "draw horizon failed");
+    }
+    return ESP_OK;
 }
 
 static esp_err_t draw_static_background(void)
@@ -4939,6 +5141,30 @@ static esp_err_t draw_nav_cards(const struct tm *tm, app_view_t current_view,
                             2, -1);
 }
 
+static esp_err_t draw_location_pin(int cx, int cy, uint16_t color, uint16_t hole)
+{
+    ESP_RETURN_ON_ERROR(lcd_fill_circle(cx, cy, 3, color), TAG, "draw pin head failed");
+    ESP_RETURN_ON_ERROR(lcd_fill_triangle(cx - 3, cy + 1, cx + 3, cy + 1, cx, cy + 7, color),
+                        TAG, "draw pin tip failed");
+    return lcd_fill_rect(cx, cy, 1, 1, hole);
+}
+
+static esp_err_t draw_health_chip(int x, int y, int w, int h, bool healthy)
+{
+    const uint16_t border = rgb565(52, 66, 118);
+    const uint16_t fill = rgb565(14, 20, 48);
+    const uint16_t dot = healthy ? rgb565(76, 235, 142) : rgb565(255, 196, 76);
+    const uint16_t text = rgb565(196, 210, 238);
+
+    ESP_RETURN_ON_ERROR(lcd_fill_round_rect(x, y, w, h, h / 2, border), TAG, "draw chip border failed");
+    ESP_RETURN_ON_ERROR(lcd_fill_round_rect(x + 1, y + 1, w - 2, h - 2, h / 2 - 1, fill),
+                        TAG, "draw chip fill failed");
+    ESP_RETURN_ON_ERROR(lcd_fill_circle(x + 10, y + h / 2, 4, mix_color(fill, dot, 2, 5)),
+                        TAG, "draw chip glow failed");
+    ESP_RETURN_ON_ERROR(lcd_fill_circle(x + 10, y + h / 2, 2, dot), TAG, "draw chip dot failed");
+    return draw_text_mixed_limited(x + 19, y + (h - 16) / 2, "状态", w - 22, 1, text);
+}
+
 static esp_err_t draw_clock_screen(const struct tm *tm)
 {
     char date_buf[32];
@@ -4958,14 +5184,14 @@ static esp_err_t draw_clock_screen(const struct tm *tm)
 
     weather_get_snapshot(&weather);
     if (weather.valid) {
-        snprintf(temp_buf, sizeof(temp_buf), "%dC", weather.temp_c);
+        snprintf(temp_buf, sizeof(temp_buf), "%d" DEG_SIGN, weather.temp_c);
         condition_text = weather_condition_zh(weather.condition);
         if (weather.city[0] != '\0') {
             center_text = weather.city;
         }
     } else {
-        strlcpy(temp_buf, "--C", sizeof(temp_buf));
-        condition_text = s_prov_active ? "配网" : "天气";
+        strlcpy(temp_buf, "--" DEG_SIGN, sizeof(temp_buf));
+        condition_text = s_prov_active ? "配网" : "等待";
     }
 
     // 先在内存中合成完整面板，再分块刷屏，避免清屏和逐元素重画被人眼看到。
@@ -4975,43 +5201,63 @@ static esp_err_t draw_clock_screen(const struct tm *tm)
                         TAG, "fill canvas failed");
     ESP_RETURN_ON_ERROR(draw_panel_frame(), TAG, "draw panel failed");
     ESP_RETURN_ON_ERROR(draw_scenic_background(), TAG, "draw scenic background failed");
-    ESP_RETURN_ON_ERROR(draw_wifi_icon(CLOCK_PANEL_X + 12, CLOCK_PANEL_Y + 8,
+
+    // 顶部状态行：左侧 Wi-Fi，中间城市，右侧天气。
+    ESP_RETURN_ON_ERROR(draw_wifi_icon(CLOCK_PANEL_X + 12, CLOCK_PANEL_Y + 6,
                                        s_wifi_connected || s_prov_active),
                         TAG, "draw wifi icon failed");
-    ESP_RETURN_ON_ERROR(draw_text_mixed_limited(CLOCK_PANEL_X + 42, CLOCK_PANEL_Y + 10, status_text,
-                                                120, 1, s_prov_active ? yellow : text),
+    ESP_RETURN_ON_ERROR(draw_text_mixed_limited(CLOCK_PANEL_X + 42, CLOCK_PANEL_Y + 8, status_text,
+                                                104, 1, s_prov_active ? yellow : text),
                         TAG, "draw status text failed");
-    ESP_RETURN_ON_ERROR(draw_text_mixed_centered_limited(160, CLOCK_PANEL_Y + 25, center_text,
-                                                         150, 1, muted),
+    int center_w = text_mixed_width(center_text, 1);
+    if (center_w > 110) {
+        center_w = 110;
+    }
+    const int center_x = 160 - (center_w + 10) / 2;
+    ESP_RETURN_ON_ERROR(draw_location_pin(center_x + 3, CLOCK_PANEL_Y + 29, rgb565(255, 120, 170),
+                                          rgb565(10, 14, 40)),
+                        TAG, "draw location pin failed");
+    ESP_RETURN_ON_ERROR(draw_text_mixed_limited(center_x + 10, CLOCK_PANEL_Y + 27, center_text,
+                                                110, 1, muted),
                         TAG, "draw center text failed");
+
     int temp_x = CLOCK_PANEL_X + CLOCK_PANEL_W - text5_width(temp_buf, 2) - 10;
     int weather_icon_x = temp_x - 18;
     ESP_RETURN_ON_ERROR(draw_dashboard_weather_icon(weather.valid ? weather.condition : NULL,
-                                                    weather_icon_x, CLOCK_PANEL_Y + 23,
+                                                    weather_icon_x, CLOCK_PANEL_Y + 16,
                                                     yellow, muted),
                         TAG, "draw dashboard weather icon failed");
-    ESP_RETURN_ON_ERROR(draw_text5(temp_x, CLOCK_PANEL_Y + 17, temp_buf, 2, text),
+    ESP_RETURN_ON_ERROR(draw_text5(temp_x, CLOCK_PANEL_Y + 10, temp_buf, 2, text),
                         TAG, "draw temperature failed");
-    ESP_RETURN_ON_ERROR(draw_text_mixed_limited(CLOCK_PANEL_X + CLOCK_PANEL_W - 43,
-                                                CLOCK_PANEL_Y + 37, condition_text,
-                                                40, 1, muted),
+    int condition_w = text_mixed_width(condition_text, 1);
+    ESP_RETURN_ON_ERROR(draw_text_mixed_limited(CLOCK_PANEL_X + CLOCK_PANEL_W - 10 - condition_w,
+                                                CLOCK_PANEL_Y + 29, condition_text,
+                                                60, 1, muted),
                         TAG, "draw weather text failed");
 
     ESP_RETURN_ON_ERROR(draw_time_digits(tm), TAG, "draw time failed");
+    ESP_RETURN_ON_ERROR(draw_progress_dots(tm->tm_sec), TAG, "draw seconds progress failed");
 
-    ESP_RETURN_ON_ERROR(draw_text5(CLOCK_PANEL_X + 18, CLOCK_PANEL_Y + 114, date_buf, 2, text),
+    // 日期行：左侧日期和星期，右侧设备状态入口。
+    const int date_y = CLOCK_PANEL_Y + 127;
+    const int date_x = CLOCK_PANEL_X + 18;
+    ESP_RETURN_ON_ERROR(draw_text5(date_x, date_y, date_buf, 2, text),
                         TAG, "draw date failed");
-    ESP_RETURN_ON_ERROR(draw_text_mixed(CLOCK_PANEL_X + 18, CLOCK_PANEL_Y + 132,
-                                        weekday_name(tm->tm_wday), 1, text),
+    ESP_RETURN_ON_ERROR(lcd_fill_rect(date_x + text5_width(date_buf, 2) + 2, date_y + 2, 1, 10,
+                                      rgb565(60, 72, 120)),
+                        TAG, "draw date divider failed");
+    ESP_RETURN_ON_ERROR(draw_text_mixed(date_x + text5_width(date_buf, 2) + 10, date_y - 1,
+                                        weekday_name(tm->tm_wday), 1, rgb565(176, 150, 255)),
                         TAG, "draw weekday failed");
-    ESP_RETURN_ON_ERROR(lcd_fill_vertical_blend_rect(CLOCK_PANEL_X + 18, CLOCK_PANEL_Y + 150, 27, 3,
-                                                     rgb565(62, 233, 255), rgb565(176, 76, 255)),
-                        TAG, "draw date accent failed");
+    ESP_RETURN_ON_ERROR(draw_health_chip(CLOCK_PANEL_X + CLOCK_PANEL_W - 70, date_y - 3, 60, 20,
+                                         s_wifi_connected && weather.valid),
+                        TAG, "draw health chip failed");
 
     ESP_RETURN_ON_ERROR(draw_nav_cards(tm, APP_VIEW_DASHBOARD, &weather), TAG, "draw nav cards failed");
-    ESP_RETURN_ON_ERROR(draw_progress_dots(tm->tm_sec), TAG, "draw progress dots failed");
     return lcd_canvas_flush();
 }
+
+#define VIEW_HEADER_H 36
 
 static esp_err_t draw_view_background(uint16_t top, uint16_t bottom)
 {
@@ -5019,34 +5265,53 @@ static esp_err_t draw_view_background(uint16_t top, uint16_t bottom)
                         TAG, "begin view canvas failed");
     ESP_RETURN_ON_ERROR(lcd_canvas_fill_gradient(top, bottom), TAG, "fill view canvas failed");
     ESP_RETURN_ON_ERROR(draw_panel_frame(), TAG, "draw view panel failed");
-    return lcd_fill_vertical_blend_rect(CLOCK_PANEL_X + 1, CLOCK_PANEL_Y + 1,
-                                        CLOCK_PANEL_W - 2, 42,
-                                        mix_color(top, rgb565(32, 54, 96), 1, 3), top);
+    ESP_RETURN_ON_ERROR(lcd_fill_panel_blend_rows(CLOCK_PANEL_Y + VIEW_HEADER_H + 1,
+                                                  CLOCK_PANEL_H - VIEW_HEADER_H - 2, top, bottom),
+                        TAG, "fill view body failed");
+    return lcd_fill_panel_blend_rows(CLOCK_PANEL_Y + 1, VIEW_HEADER_H,
+                                     mix_color(top, rgb565(30, 46, 92), 1, 2), top);
 }
 
-static esp_err_t draw_view_header(const char *title, const struct tm *tm)
+static esp_err_t draw_view_header(const char *title, const struct tm *tm, uint16_t accent)
 {
     char time_buf[8];
-    const uint16_t text = rgb565(232, 240, 255);
+    const uint16_t text = rgb565(240, 245, 255);
     const uint16_t muted = rgb565(142, 158, 191);
     const uint16_t yellow = rgb565(255, 211, 85);
+    const uint16_t line = rgb565(32, 46, 84);
     const char *status_text = s_prov_active ? "配网" :
                               (!s_wifi_configured ? "未配网" :
                                (s_wifi_connected && s_connected_ssid[0] != '\0' ? s_connected_ssid : "连接中"));
+    const int line_y = CLOCK_PANEL_Y + VIEW_HEADER_H;
+    int title_w = text_mixed_width(title, 1);
+
+    if (title_w > 74) {
+        title_w = 74;
+    }
 
     snprintf(time_buf, sizeof(time_buf), "%02d:%02d", tm->tm_hour, tm->tm_min);
-    ESP_RETURN_ON_ERROR(draw_wifi_icon(CLOCK_PANEL_X + 10, CLOCK_PANEL_Y + 5,
+    ESP_RETURN_ON_ERROR(draw_wifi_icon(CLOCK_PANEL_X + 10, CLOCK_PANEL_Y + 4,
                                        s_wifi_connected || s_prov_active),
                         TAG, "draw view wifi failed");
     ESP_RETURN_ON_ERROR(draw_text_mixed_limited(CLOCK_PANEL_X + 40, CLOCK_PANEL_Y + 9,
-                                                status_text, 92, 1,
+                                                status_text, 72, 1,
                                                 s_prov_active ? yellow : muted),
                         TAG, "draw view wifi text failed");
     ESP_RETURN_ON_ERROR(draw_text_mixed_centered_limited(160, CLOCK_PANEL_Y + 9,
                                                          title, 74, 1, text),
                         TAG, "draw view title failed");
-    return draw_text5(CLOCK_PANEL_X + CLOCK_PANEL_W - text5_width(time_buf, 1) - 12,
-                      CLOCK_PANEL_Y + 14, time_buf, 1, muted);
+
+    // 分隔线中间用页面主题色高亮，标题下方带一段短强调条。
+    ESP_RETURN_ON_ERROR(lcd_draw_hline(CLOCK_PANEL_X + 8, line_y, CLOCK_PANEL_W - 16, line),
+                        TAG, "draw view header line failed");
+    ESP_RETURN_ON_ERROR(lcd_fill_round_rect(160 - title_w / 2 - 4, line_y - 1, title_w + 8, 3, 1, accent),
+                        TAG, "draw view title accent failed");
+
+    ESP_RETURN_ON_ERROR(lcd_fill_round_rect(CLOCK_PANEL_X + CLOCK_PANEL_W - 52, CLOCK_PANEL_Y + 9,
+                                            42, 17, 8, mix_color(rgb565(12, 18, 40), accent, 1, 6)),
+                        TAG, "draw view time chip failed");
+    return draw_text5(CLOCK_PANEL_X + CLOCK_PANEL_W - 31 - text5_width(time_buf, 1) / 2,
+                      CLOCK_PANEL_Y + 14, time_buf, 1, mix_color(muted, accent, 1, 2));
 }
 
 static esp_err_t draw_clock_hand(int cx, int cy, float degrees, int length,
@@ -5060,67 +5325,110 @@ static esp_err_t draw_clock_hand(int cx, int cy, float degrees, int length,
 
 static esp_err_t draw_analog_clock_screen(const struct tm *tm)
 {
-    const int cx = 160;
-    const int cy = 124;
-    const int radius = 58;
-    const uint16_t face = rgb565(233, 241, 244);
-    const uint16_t ring = rgb565(71, 153, 255);
-    const uint16_t dark = rgb565(16, 24, 42);
-    const uint16_t tick = rgb565(53, 71, 100);
-    const uint16_t minute_color = rgb565(31, 45, 73);
-    const uint16_t second_color = rgb565(255, 95, 125);
-    char digital_buf[16];
+    const int cx = CLOCK_PANEL_X + 92;
+    const int cy = CLOCK_PANEL_Y + 118;
+    const int radius = 56;
+    const uint16_t face_top = rgb565(22, 34, 70);
+    const uint16_t face_bottom = rgb565(10, 16, 38);
+    const uint16_t ring = rgb565(76, 176, 255);
+    const uint16_t ring_dim = rgb565(28, 52, 104);
+    const uint16_t tick = rgb565(64, 82, 130);
+    const uint16_t tick_major = rgb565(176, 214, 255);
+    const uint16_t number = rgb565(214, 226, 248);
+    const uint16_t hour_color = rgb565(240, 246, 255);
+    const uint16_t minute_color = rgb565(120, 200, 255);
+    const uint16_t second_color = rgb565(255, 96, 150);
+    const uint16_t text = rgb565(232, 240, 255);
+    const uint16_t muted = rgb565(142, 158, 191);
+    char hm_buf[8];
+    char sec_buf[8];
+    char date_buf[32];
 
-    ESP_RETURN_ON_ERROR(draw_view_background(rgb565(5, 9, 24), rgb565(7, 18, 35)),
+    ESP_RETURN_ON_ERROR(draw_view_background(rgb565(6, 10, 28), rgb565(8, 16, 36)),
                         TAG, "draw analog bg failed");
-    ESP_RETURN_ON_ERROR(draw_view_header("时间", tm), TAG, "draw analog header failed");
+    ESP_RETURN_ON_ERROR(draw_view_header("时间", tm, rgb565(76, 176, 255)), TAG, "draw analog header failed");
 
-    ESP_RETURN_ON_ERROR(lcd_fill_circle(cx, cy, radius + 5, rgb565(10, 29, 58)),
-                        TAG, "draw clock outer failed");
-    ESP_RETURN_ON_ERROR(lcd_fill_circle(cx, cy, radius + 2, ring), TAG, "draw clock ring failed");
-    ESP_RETURN_ON_ERROR(lcd_fill_circle(cx, cy, radius, face), TAG, "draw clock face failed");
+    // 表盘：外圈光晕 + 主题色细环 + 上亮下暗的深色表面。
+    ESP_RETURN_ON_ERROR(lcd_fill_circle(cx, cy, radius + 6, rgb565(12, 22, 48)),
+                        TAG, "draw clock halo failed");
+    ESP_RETURN_ON_ERROR(lcd_fill_circle(cx, cy, radius + 3, ring_dim), TAG, "draw clock ring failed");
+    ESP_RETURN_ON_ERROR(lcd_draw_arc(cx, cy, radius + 2, -150, -30, 2, ring), TAG, "draw clock ring hi failed");
+    for (int y = -radius; y <= radius; ++y) {
+        int x_span = (int)sqrtf((float)(radius * radius - y * y));
+        ESP_RETURN_ON_ERROR(lcd_fill_rect(cx - x_span, cy + y, x_span * 2 + 1, 1,
+                                          mix_color(face_top, face_bottom, y + radius, radius * 2)),
+                            TAG, "draw clock face failed");
+    }
 
     for (int i = 0; i < 60; ++i) {
         float degrees = (float)i * 6.0f - 90.0f;
         float rad = degrees * (float)M_PI / 180.0f;
-        int outer = radius - 2;
-        int inner = radius - ((i % 5) == 0 ? 10 : 5);
+        bool major = (i % 5) == 0;
+        int outer = radius - 3;
+        int inner = radius - (major ? 9 : 5);
         int x0 = cx + (int)roundf(cosf(rad) * inner);
         int y0 = cy + (int)roundf(sinf(rad) * inner);
         int x1 = cx + (int)roundf(cosf(rad) * outer);
         int y1 = cy + (int)roundf(sinf(rad) * outer);
-        ESP_RETURN_ON_ERROR(lcd_draw_line(x0, y0, x1, y1, (i % 5) == 0 ? 2 : 1, tick),
-                            TAG, "draw clock tick failed");
+        if (major) {
+            ESP_RETURN_ON_ERROR(lcd_draw_line(x0, y0, x1, y1, 2, (i % 15) == 0 ? ring : tick_major),
+                                TAG, "draw clock tick failed");
+        } else {
+            ESP_RETURN_ON_ERROR(lcd_fill_rect(x1, y1, 1, 1, tick), TAG, "draw clock tick failed");
+        }
     }
 
-    ESP_RETURN_ON_ERROR(draw_text5_centered(cx, cy - radius + 12, "12", 2, dark),
+    ESP_RETURN_ON_ERROR(draw_text5_centered(cx, cy - radius + 13, "12", 1, number),
                         TAG, "draw clock number failed");
-    ESP_RETURN_ON_ERROR(draw_text5_centered(cx + radius - 17, cy - 7, "3", 2, dark),
+    ESP_RETURN_ON_ERROR(draw_text5_centered(cx + radius - 16, cy - 3, "3", 1, number),
                         TAG, "draw clock number failed");
-    ESP_RETURN_ON_ERROR(draw_text5_centered(cx, cy + radius - 24, "6", 2, dark),
+    ESP_RETURN_ON_ERROR(draw_text5_centered(cx, cy + radius - 20, "6", 1, number),
                         TAG, "draw clock number failed");
-    ESP_RETURN_ON_ERROR(draw_text5_centered(cx - radius + 16, cy - 7, "9", 2, dark),
+    ESP_RETURN_ON_ERROR(draw_text5_centered(cx - radius + 16, cy - 3, "9", 1, number),
                         TAG, "draw clock number failed");
 
     float hour_degrees = ((float)(tm->tm_hour % 12) + (float)tm->tm_min / 60.0f +
                           (float)tm->tm_sec / 3600.0f) * 30.0f - 90.0f;
     float minute_degrees = ((float)tm->tm_min + (float)tm->tm_sec / 60.0f) * 6.0f - 90.0f;
     float second_degrees = (float)tm->tm_sec * 6.0f - 90.0f;
-    ESP_RETURN_ON_ERROR(draw_clock_hand(cx, cy, hour_degrees, 31, 5, dark),
+    ESP_RETURN_ON_ERROR(draw_clock_hand(cx + 1, cy + 2, hour_degrees, 28, 5, rgb565(4, 8, 20)),
+                        TAG, "draw hour shadow failed");
+    ESP_RETURN_ON_ERROR(draw_clock_hand(cx, cy, hour_degrees, 28, 5, hour_color),
                         TAG, "draw hour hand failed");
-    ESP_RETURN_ON_ERROR(draw_clock_hand(cx, cy, minute_degrees, 44, 3, minute_color),
+    ESP_RETURN_ON_ERROR(draw_clock_hand(cx + 1, cy + 2, minute_degrees, 42, 3, rgb565(4, 8, 20)),
+                        TAG, "draw minute shadow failed");
+    ESP_RETURN_ON_ERROR(draw_clock_hand(cx, cy, minute_degrees, 42, 3, minute_color),
                         TAG, "draw minute hand failed");
-    ESP_RETURN_ON_ERROR(draw_clock_hand(cx, cy, second_degrees, 50, 1, second_color),
+    ESP_RETURN_ON_ERROR(draw_clock_hand(cx, cy, second_degrees + 180.0f, 10, 1, second_color),
+                        TAG, "draw second tail failed");
+    ESP_RETURN_ON_ERROR(draw_clock_hand(cx, cy, second_degrees, 48, 1, second_color),
                         TAG, "draw second hand failed");
-    ESP_RETURN_ON_ERROR(lcd_fill_circle(cx, cy, 5, rgb565(255, 255, 255)),
-                        TAG, "draw clock center failed");
+    ESP_RETURN_ON_ERROR(lcd_fill_circle(cx, cy, 4, hour_color), TAG, "draw clock center failed");
     ESP_RETURN_ON_ERROR(lcd_fill_circle(cx, cy, 2, second_color), TAG, "draw clock pin failed");
 
-    snprintf(digital_buf, sizeof(digital_buf), "%02d:%02d:%02d",
-             tm->tm_hour, tm->tm_min, tm->tm_sec);
-    ESP_RETURN_ON_ERROR(draw_text5_centered(160, CLOCK_PANEL_Y + 176, digital_buf, 2,
-                                            rgb565(208, 239, 255)),
+    // 右侧数字信息栏。
+    const int info_x = CLOCK_PANEL_X + 170;
+    const int info_w = CLOCK_PANEL_W - 170 - 14;
+    const int info_cx = info_x + info_w / 2;
+    snprintf(hm_buf, sizeof(hm_buf), "%02d:%02d", tm->tm_hour, tm->tm_min);
+    snprintf(sec_buf, sizeof(sec_buf), "%02d", tm->tm_sec);
+    snprintf(date_buf, sizeof(date_buf), "%04d/%02d/%02d", tm->tm_year + 1900, tm->tm_mon + 1, tm->tm_mday);
+
+    ESP_RETURN_ON_ERROR(draw_text5_centered(info_cx, CLOCK_PANEL_Y + 62, hm_buf, 3, text),
                         TAG, "draw analog digital failed");
+    ESP_RETURN_ON_ERROR(lcd_fill_round_rect(info_cx - 22, CLOCK_PANEL_Y + 92, 44, 22, 11,
+                                            mix_color(rgb565(10, 16, 36), second_color, 1, 5)),
+                        TAG, "draw seconds chip failed");
+    ESP_RETURN_ON_ERROR(draw_text5_centered(info_cx, CLOCK_PANEL_Y + 96, sec_buf, 2, second_color),
+                        TAG, "draw analog seconds failed");
+    ESP_RETURN_ON_ERROR(lcd_draw_hline(info_x + 8, CLOCK_PANEL_Y + 126, info_w - 16, rgb565(32, 46, 84)),
+                        TAG, "draw analog divider failed");
+    ESP_RETURN_ON_ERROR(draw_text5_centered(info_cx, CLOCK_PANEL_Y + 138, date_buf, 1, muted),
+                        TAG, "draw analog date failed");
+    ESP_RETURN_ON_ERROR(draw_text_mixed_centered_limited(info_cx, CLOCK_PANEL_Y + 154,
+                                                         weekday_name(tm->tm_wday), info_w, 1,
+                                                         rgb565(176, 150, 255)),
+                        TAG, "draw analog weekday failed");
     return lcd_canvas_flush();
 }
 
@@ -5143,16 +5451,16 @@ static esp_err_t draw_calendar_screen(const struct tm *tm)
     static const char *week_labels[] = {"日", "一", "二", "三", "四", "五", "六"};
     const int year = tm->tm_year + 1900;
     const int month = tm->tm_mon + 1;
-    const int cell_w = 36;
-    const int row_h = 14;
-    const int grid_x = 34;
-    const int week_y = CLOCK_PANEL_Y + 66;
-    const int day_y = CLOCK_PANEL_Y + 88;
+    const int cell_w = 38;
+    const int grid_x = 160 - cell_w * 7 / 2;
+    const int week_y = CLOCK_PANEL_Y + 42;
+    const int day_y = CLOCK_PANEL_Y + 66;
     const uint16_t text = rgb565(232, 240, 255);
     const uint16_t muted = rgb565(140, 156, 190);
-    const uint16_t line = rgb565(36, 51, 82);
-    const uint16_t today_bg = rgb565(224, 106, 255);
-    const uint16_t today_text = rgb565(15, 17, 32);
+    const uint16_t faint = rgb565(56, 66, 100);
+    const uint16_t weekend = rgb565(121, 206, 255);
+    const uint16_t today_bg = rgb565(196, 110, 255);
+    const uint16_t today_text = rgb565(255, 255, 255);
     char month_buf[32];
     struct tm first_day = {
         .tm_year = tm->tm_year,
@@ -5164,42 +5472,54 @@ static esp_err_t draw_calendar_screen(const struct tm *tm)
     (void)mktime(&first_day);
     int first_wday = first_day.tm_wday;
     int month_days = days_in_month(year, month);
-
-    ESP_RETURN_ON_ERROR(draw_view_background(rgb565(7, 10, 25), rgb565(17, 14, 36)),
-                        TAG, "draw calendar bg failed");
-    ESP_RETURN_ON_ERROR(draw_view_header("日期", tm), TAG, "draw calendar header failed");
+    int prev_days = days_in_month(month == 1 ? year - 1 : year, month == 1 ? 12 : month - 1);
+    int rows = (first_wday + month_days + 6) / 7;
+    int row_h = rows > 5 ? 22 : 26;
 
     snprintf(month_buf, sizeof(month_buf), "%04d/%02d", year, month);
-    ESP_RETURN_ON_ERROR(draw_text5_centered(160, CLOCK_PANEL_Y + 42, month_buf, 2, text),
-                        TAG, "draw month failed");
-    ESP_RETURN_ON_ERROR(lcd_draw_hline(grid_x, CLOCK_PANEL_Y + 62, cell_w * 7, line),
-                        TAG, "draw calendar line failed");
+    ESP_RETURN_ON_ERROR(draw_view_background(rgb565(8, 10, 28), rgb565(18, 14, 38)),
+                        TAG, "draw calendar bg failed");
+    ESP_RETURN_ON_ERROR(draw_view_header(month_buf, tm, rgb565(196, 110, 255)), TAG,
+                        "draw calendar header failed");
 
+    ESP_RETURN_ON_ERROR(lcd_fill_round_rect(grid_x - 4, week_y - 2, cell_w * 7 + 8, 20, 6, rgb565(20, 22, 50)),
+                        TAG, "draw week band failed");
     for (int col = 0; col < 7; ++col) {
         int center_x = grid_x + col * cell_w + cell_w / 2;
-        ESP_RETURN_ON_ERROR(draw_text_mixed_centered_limited(center_x, week_y,
-                                                             week_labels[col], 18, 1, muted),
+        ESP_RETURN_ON_ERROR(draw_text_mixed_centered_limited(center_x, week_y, week_labels[col], 18, 1,
+                                                             (col == 0 || col == 6) ? weekend : muted),
                             TAG, "draw weekday label failed");
     }
 
-    for (int day = 1; day <= month_days; ++day) {
-        int index = first_wday + day - 1;
+    for (int index = 0; index < rows * 7; ++index) {
         int col = index % 7;
         int row = index / 7;
+        int day = index - first_wday + 1;
         int center_x = grid_x + col * cell_w + cell_w / 2;
         int y = day_y + row * row_h;
         char day_buf[12];
         uint16_t day_color = text;
 
-        snprintf(day_buf, sizeof(day_buf), "%d", day);
-        if (day == tm->tm_mday) {
-            ESP_RETURN_ON_ERROR(lcd_fill_round_rect(center_x - 13, y - 1, 26, 13, 4, today_bg),
-                                TAG, "draw today highlight failed");
-            day_color = today_text;
-        } else if (col == 0 || col == 6) {
-            day_color = rgb565(121, 206, 255);
+        if (day < 1) {
+            snprintf(day_buf, sizeof(day_buf), "%d", prev_days + day);
+            day_color = faint;
+        } else if (day > month_days) {
+            snprintf(day_buf, sizeof(day_buf), "%d", day - month_days);
+            day_color = faint;
+        } else {
+            snprintf(day_buf, sizeof(day_buf), "%d", day);
+            if (day == tm->tm_mday) {
+                ESP_RETURN_ON_ERROR(lcd_fill_round_rect(center_x - 15, y - 3, 30, 19, 9,
+                                                        mix_color(today_bg, rgb565(10, 10, 30), 1, 2)),
+                                    TAG, "draw today glow failed");
+                ESP_RETURN_ON_ERROR(lcd_fill_round_rect(center_x - 13, y - 2, 26, 17, 8, today_bg),
+                                    TAG, "draw today highlight failed");
+                day_color = today_text;
+            } else if (col == 0 || col == 6) {
+                day_color = weekend;
+            }
         }
-        ESP_RETURN_ON_ERROR(draw_text5_centered(center_x, y + 2, day_buf, 1, day_color),
+        ESP_RETURN_ON_ERROR(draw_text5_centered(center_x, y + 3, day_buf, 1, day_color),
                             TAG, "draw calendar day failed");
     }
 
@@ -5208,10 +5528,10 @@ static esp_err_t draw_calendar_screen(const struct tm *tm)
 
 static esp_err_t draw_cloud_symbol(int cx, int cy, uint16_t cloud, uint16_t shade)
 {
-    ESP_RETURN_ON_ERROR(lcd_fill_circle(cx - 15, cy + 4, 13, shade), TAG, "draw cloud shade failed");
-    ESP_RETURN_ON_ERROR(lcd_fill_circle(cx, cy - 3, 17, cloud), TAG, "draw cloud body failed");
-    ESP_RETURN_ON_ERROR(lcd_fill_circle(cx + 17, cy + 5, 12, cloud), TAG, "draw cloud body failed");
-    return lcd_fill_round_rect(cx - 27, cy + 4, 56, 18, 7, cloud);
+    ESP_RETURN_ON_ERROR(lcd_fill_circle(cx - 11, cy + 3, 10, shade), TAG, "draw cloud shade failed");
+    ESP_RETURN_ON_ERROR(lcd_fill_circle(cx, cy - 2, 13, cloud), TAG, "draw cloud body failed");
+    ESP_RETURN_ON_ERROR(lcd_fill_circle(cx + 13, cy + 4, 9, cloud), TAG, "draw cloud body failed");
+    return lcd_fill_round_rect(cx - 21, cy + 3, 43, 14, 6, cloud);
 }
 
 static esp_err_t draw_weather_symbol(const char *condition, int cx, int cy)
@@ -5233,36 +5553,36 @@ static esp_err_t draw_weather_symbol(const char *condition, int cx, int cy)
                   strstr(condition, "HAZE") != NULL);
 
     if (!rainy && !snowy && !cloudy && !foggy && !thunder) {
-        return draw_sun_icon(cx, cy, 18, sun);
+        return draw_sun_icon(cx, cy, 13, sun);
     }
 
     if (cloudy || foggy) {
-        ESP_RETURN_ON_ERROR(draw_sun_icon(cx - 19, cy - 8, 12, sun), TAG, "draw cloud sun failed");
+        ESP_RETURN_ON_ERROR(draw_sun_icon(cx - 14, cy - 7, 8, sun), TAG, "draw cloud sun failed");
     }
     ESP_RETURN_ON_ERROR(draw_cloud_symbol(cx, cy, cloud, shade), TAG, "draw cloud failed");
 
     if (thunder) {
-        return lcd_fill_triangle(cx - 2, cy + 14, cx - 13, cy + 40, cx + 5, cy + 23,
+        return lcd_fill_triangle(cx - 1, cy + 12, cx - 9, cy + 30, cx + 5, cy + 18,
                                  rgb565(255, 216, 73));
     }
     if (rainy) {
         for (int i = 0; i < 4; ++i) {
-            int x = cx - 20 + i * 13;
-            ESP_RETURN_ON_ERROR(lcd_draw_line(x, cy + 26, x - 5, cy + 39, 2, rain),
+            int x = cx - 14 + i * 10;
+            ESP_RETURN_ON_ERROR(lcd_draw_line(x, cy + 20, x - 3, cy + 28, 2, rain),
                                 TAG, "draw rain failed");
         }
         return ESP_OK;
     }
     if (snowy) {
         for (int i = 0; i < 4; ++i) {
-            ESP_RETURN_ON_ERROR(lcd_fill_circle(cx - 19 + i * 13, cy + 32 + (i % 2) * 5,
+            ESP_RETURN_ON_ERROR(lcd_fill_circle(cx - 15 + i * 10, cy + 22 + (i % 2) * 4,
                                                 2, snow),
                                 TAG, "draw snow failed");
         }
     }
     if (foggy) {
-        ESP_RETURN_ON_ERROR(lcd_draw_hline(cx - 28, cy + 29, 56, shade), TAG, "draw fog failed");
-        return lcd_draw_hline(cx - 22, cy + 37, 44, shade);
+        ESP_RETURN_ON_ERROR(lcd_draw_hline(cx - 21, cy + 21, 43, shade), TAG, "draw fog failed");
+        return lcd_draw_hline(cx - 16, cy + 26, 32, shade);
     }
     return ESP_OK;
 }
@@ -5340,60 +5660,102 @@ static void weather_forecast_label(const char *date_text, const struct tm *tm,
     snprintf(label, label_len, "%02d/%02d", month, day);
 }
 
+static uint16_t temperature_color(int temp_c)
+{
+    // 冷色到暖色：<=0 蓝，10 青，20 绿黄，>=30 橙。
+    if (temp_c <= 0) {
+        return rgb565(80, 150, 255);
+    }
+    if (temp_c <= 10) {
+        return mix_color(rgb565(80, 150, 255), rgb565(76, 226, 230), temp_c, 10);
+    }
+    if (temp_c <= 20) {
+        return mix_color(rgb565(76, 226, 230), rgb565(190, 230, 110), temp_c - 10, 10);
+    }
+    if (temp_c <= 30) {
+        return mix_color(rgb565(190, 230, 110), rgb565(255, 160, 80), temp_c - 20, 10);
+    }
+    return rgb565(255, 120, 80);
+}
+
 static esp_err_t draw_weather_forecast_rows(const struct tm *tm, const weather_info_t *weather)
 {
-    const uint16_t line = rgb565(29, 53, 72);
     const uint16_t text = rgb565(220, 238, 248);
     const uint16_t muted = rgb565(133, 158, 181);
-    const uint16_t accent = rgb565(94, 236, 218);
-    const int row_x = CLOCK_PANEL_X + 16;
-    const int row_w = CLOCK_PANEL_W - 32;
-    const int row_y0 = CLOCK_PANEL_Y + 116;
-    const int row_h = 12;
+    const uint16_t track = rgb565(24, 40, 62);
+    const uint16_t today_bg = rgb565(16, 36, 52);
+    const int row_x = CLOCK_PANEL_X + 14;
+    const int row_w = CLOCK_PANEL_W - 28;
+    const int row_y0 = CLOCK_PANEL_Y + 105;
+    const int row_h = 13;
+    const int icon_x = row_x + 48;
+    const int min_right = row_x + 94;
+    const int bar_x = row_x + 102;
+    const int bar_w = row_w - 102 - 34;
+    const int max_x = bar_x + bar_w + 8;
+    int range_min = 1000;
+    int range_max = -1000;
 
-    ESP_RETURN_ON_ERROR(draw_text5(CLOCK_PANEL_X + 20, CLOCK_PANEL_Y + 106,
-                                   "7D", 1, accent),
-                        TAG, "draw forecast title failed");
-    ESP_RETURN_ON_ERROR(lcd_draw_hline(CLOCK_PANEL_X + 42, CLOCK_PANEL_Y + 109,
-                                       CLOCK_PANEL_W - 66, line),
-                        TAG, "draw forecast title line failed");
+    for (int i = 0; weather != NULL && i < WEATHER_FORECAST_DAYS && i < weather->forecast_count; ++i) {
+        if (!weather->forecast[i].valid) {
+            continue;
+        }
+        if (weather->forecast[i].min_c < range_min) {
+            range_min = weather->forecast[i].min_c;
+        }
+        if (weather->forecast[i].max_c > range_max) {
+            range_max = weather->forecast[i].max_c;
+        }
+    }
+    if (range_max <= range_min) {
+        range_max = range_min + 1;
+    }
 
     for (int i = 0; i < WEATHER_FORECAST_DAYS; ++i) {
         const bool valid = weather != NULL && i < weather->forecast_count && weather->forecast[i].valid;
         const char *condition = valid ? weather->forecast[i].condition : NULL;
         char label[12];
-        char temp_buf[16];
+        char min_buf[12];
+        char max_buf[12];
         int y = row_y0 + i * row_h;
 
-        if (valid) {
-            weather_forecast_label(weather->forecast[i].date, tm, label, sizeof(label));
-            snprintf(temp_buf, sizeof(temp_buf), "%d/%dC",
-                     weather->forecast[i].min_c, weather->forecast[i].max_c);
-        } else {
-            strlcpy(label, "--", sizeof(label));
-            strlcpy(temp_buf, "--/--C", sizeof(temp_buf));
+        if (i == 0 && valid) {
+            ESP_RETURN_ON_ERROR(lcd_fill_round_rect(row_x - 4, y - 3, row_w + 8, row_h, 4, today_bg),
+                                TAG, "draw forecast today bg failed");
+        }
+        if (!valid) {
+            ESP_RETURN_ON_ERROR(draw_text5(row_x, y, "--/--", 1, muted), TAG, "draw forecast label failed");
+            ESP_RETURN_ON_ERROR(lcd_fill_round_rect(bar_x, y + 2, bar_w, 3, 1, track),
+                                TAG, "draw forecast track failed");
+            continue;
         }
 
-        if (i > 0) {
-            ESP_RETURN_ON_ERROR(lcd_draw_hline(row_x, y - 2, row_w, line),
-                                TAG, "draw forecast row line failed");
-        }
-        ESP_RETURN_ON_ERROR(draw_text_mixed_limited(row_x, y, label, 34, 1,
-                                                    valid ? text : muted),
+        weather_forecast_label(weather->forecast[i].date, tm, label, sizeof(label));
+        snprintf(min_buf, sizeof(min_buf), "%d" DEG_SIGN, weather->forecast[i].min_c);
+        snprintf(max_buf, sizeof(max_buf), "%d" DEG_SIGN, weather->forecast[i].max_c);
+
+        ESP_RETURN_ON_ERROR(draw_text5(row_x, y, label, 1, i == 0 ? rgb565(95, 236, 221) : text),
                             TAG, "draw forecast label failed");
-        if (valid) {
-            ESP_RETURN_ON_ERROR(draw_weather_mini_symbol(condition, row_x + 51, y + 3, accent),
-                                TAG, "draw forecast mini failed");
-        } else {
-            ESP_RETURN_ON_ERROR(draw_text5(row_x + 45, y + 2, "--", 1, muted),
-                                TAG, "draw forecast placeholder failed");
+        ESP_RETURN_ON_ERROR(draw_weather_mini_symbol(condition, icon_x, y + 1, muted),
+                            TAG, "draw forecast mini failed");
+        ESP_RETURN_ON_ERROR(draw_text5(min_right - text5_width(min_buf, 1), y, min_buf, 1, muted),
+                            TAG, "draw forecast min failed");
+
+        // 温度区间条：灰色轨道表示 7 日总区间，彩色段表示当天最低到最高温。
+        int seg_x0 = bar_x + ((weather->forecast[i].min_c - range_min) * (bar_w - 4)) / (range_max - range_min);
+        int seg_x1 = bar_x + 4 + ((weather->forecast[i].max_c - range_min) * (bar_w - 4)) / (range_max - range_min);
+        ESP_RETURN_ON_ERROR(lcd_fill_round_rect(bar_x, y + 2, bar_w, 3, 1, track),
+                            TAG, "draw forecast track failed");
+        uint16_t c0 = temperature_color(weather->forecast[i].min_c);
+        uint16_t c1 = temperature_color(weather->forecast[i].max_c);
+        int seg_w = seg_x1 - seg_x0;
+        for (int px = 0; px < seg_w; ++px) {
+            int h = (px == 0 || px == seg_w - 1) ? 3 : 5;
+            ESP_RETURN_ON_ERROR(lcd_fill_rect(seg_x0 + px, y + 1 + (5 - h) / 2, 1, h,
+                                              mix_color(c0, c1, px, seg_w > 1 ? seg_w - 1 : 1)),
+                                TAG, "draw forecast range failed");
         }
-        ESP_RETURN_ON_ERROR(draw_text_mixed_limited(row_x + 70, y, valid ? weather_condition_zh(condition) : "WAIT",
-                                                    60, 1, valid ? text : muted),
-                            TAG, "draw forecast condition failed");
-        ESP_RETURN_ON_ERROR(draw_text5(CLOCK_PANEL_X + CLOCK_PANEL_W - text5_width(temp_buf, 1) - 18,
-                                       y + 1, temp_buf, 1, valid ? accent : muted),
-                            TAG, "draw forecast temp failed");
+        ESP_RETURN_ON_ERROR(draw_text5(max_x, y, max_buf, 1, text), TAG, "draw forecast max failed");
     }
     return ESP_OK;
 }
@@ -5401,20 +5763,20 @@ static esp_err_t draw_weather_forecast_rows(const struct tm *tm, const weather_i
 static esp_err_t draw_weather_screen(const struct tm *tm)
 {
     weather_info_t weather = {0};
-    const char *condition_text = "天气";
+    const char *condition_text = "等待";
     const char *city_text = CONFIG_CLOCK_WEATHER_CITY_LABEL;
     const uint16_t text = rgb565(232, 240, 255);
     const uint16_t muted = rgb565(145, 161, 196);
-    const uint16_t accent = rgb565(95, 255, 221);
-    const uint16_t band_top = rgb565(8, 28, 44);
-    const uint16_t band_bottom = rgb565(10, 43, 50);
+    const uint16_t accent = rgb565(95, 236, 221);
+    const uint16_t card = rgb565(10, 30, 46);
+    const uint16_t card_border = rgb565(26, 58, 76);
     char temp_buf[16];
     char hum_buf[16];
     char updated_buf[16];
 
     weather_get_snapshot(&weather);
     if (weather.valid) {
-        snprintf(temp_buf, sizeof(temp_buf), "%dC", weather.temp_c);
+        snprintf(temp_buf, sizeof(temp_buf), "%d" DEG_SIGN, weather.temp_c);
         snprintf(hum_buf, sizeof(hum_buf), "%d%%", weather.humidity);
         condition_text = weather_condition_zh(weather.condition);
         if (weather.city[0] != '\0') {
@@ -5425,38 +5787,43 @@ static esp_err_t draw_weather_screen(const struct tm *tm)
         snprintf(updated_buf, sizeof(updated_buf), "UP %02d:%02d",
                  updated_tm.tm_hour, updated_tm.tm_min);
     } else {
-        strlcpy(temp_buf, "--C", sizeof(temp_buf));
+        strlcpy(temp_buf, "--" DEG_SIGN, sizeof(temp_buf));
         strlcpy(hum_buf, "--%", sizeof(hum_buf));
         strlcpy(updated_buf, "UP --:--", sizeof(updated_buf));
-        condition_text = s_prov_active ? "配网" : "天气";
+        condition_text = s_prov_active ? "配网" : "等待";
     }
 
-    ESP_RETURN_ON_ERROR(draw_view_background(rgb565(5, 11, 25), rgb565(5, 25, 34)),
+    ESP_RETURN_ON_ERROR(draw_view_background(rgb565(5, 12, 28), rgb565(5, 24, 34)),
                         TAG, "draw weather bg failed");
-    ESP_RETURN_ON_ERROR(draw_view_header("天气", tm), TAG, "draw weather header failed");
+    ESP_RETURN_ON_ERROR(draw_view_header("天气", tm, accent), TAG, "draw weather header failed");
 
-    ESP_RETURN_ON_ERROR(lcd_fill_vertical_blend_rect(CLOCK_PANEL_X + 1, CLOCK_PANEL_Y + 43,
-                                                     CLOCK_PANEL_W - 2, 56,
-                                                     band_top, band_bottom),
-                        TAG, "draw weather band failed");
+    // 当前天气卡片。
+    const int card_x = CLOCK_PANEL_X + 10;
+    const int card_y = CLOCK_PANEL_Y + 42;
+    const int card_w = CLOCK_PANEL_W - 20;
+    const int card_h = 56;
+    ESP_RETURN_ON_ERROR(lcd_fill_round_rect(card_x, card_y, card_w, card_h, 8, card_border),
+                        TAG, "draw weather card border failed");
+    ESP_RETURN_ON_ERROR(lcd_fill_round_rect(card_x + 1, card_y + 1, card_w - 2, card_h - 2, 7, card),
+                        TAG, "draw weather card failed");
     ESP_RETURN_ON_ERROR(draw_weather_symbol(weather.valid ? weather.condition : NULL,
-                                            CLOCK_PANEL_X + 52, CLOCK_PANEL_Y + 60),
+                                            card_x + 40, card_y + 25),
                         TAG, "draw weather symbol failed");
-    ESP_RETURN_ON_ERROR(draw_text5(CLOCK_PANEL_X + 105, CLOCK_PANEL_Y + 58, temp_buf, 4, text),
+    ESP_RETURN_ON_ERROR(draw_text5(card_x + 82, card_y + 14, temp_buf, 4,
+                                   weather.valid ? temperature_color(weather.temp_c) : muted),
                         TAG, "draw weather temp failed");
-    ESP_RETURN_ON_ERROR(draw_text_mixed_limited(CLOCK_PANEL_X + 203, CLOCK_PANEL_Y + 61,
-                                                city_text, 74, 1, muted),
+
+    const int info_x = card_x + 172;
+    const int info_w = card_w - 172 - 8;
+    ESP_RETURN_ON_ERROR(draw_location_pin(info_x + 3, card_y + 9, rgb565(255, 120, 170), card),
+                        TAG, "draw weather pin failed");
+    ESP_RETURN_ON_ERROR(draw_text_mixed_limited(info_x + 11, card_y + 4, city_text, info_w - 11, 1, muted),
                         TAG, "draw weather city failed");
-    ESP_RETURN_ON_ERROR(draw_text_mixed_limited(CLOCK_PANEL_X + 203, CLOCK_PANEL_Y + 78,
-                                                condition_text, 74, 1, text),
+    ESP_RETURN_ON_ERROR(draw_text_mixed_limited(info_x, card_y + 20, condition_text, 40, 1, text),
                         TAG, "draw weather condition failed");
-    ESP_RETURN_ON_ERROR(draw_text_mixed(CLOCK_PANEL_X + 105, CLOCK_PANEL_Y + 94,
-                                        "湿度", 1, muted),
-                        TAG, "draw humidity label failed");
-    ESP_RETURN_ON_ERROR(draw_text5(CLOCK_PANEL_X + 146, CLOCK_PANEL_Y + 96, hum_buf, 1, accent),
+    ESP_RETURN_ON_ERROR(draw_text5(info_x + 46, card_y + 25, hum_buf, 1, accent),
                         TAG, "draw humidity value failed");
-    ESP_RETURN_ON_ERROR(draw_text5(CLOCK_PANEL_X + 203, CLOCK_PANEL_Y + 96,
-                                   updated_buf, 1, muted),
+    ESP_RETURN_ON_ERROR(draw_text5(info_x, card_y + 42, updated_buf, 1, rgb565(96, 120, 150)),
                         TAG, "draw weather update failed");
     ESP_RETURN_ON_ERROR(draw_weather_forecast_rows(tm, &weather), TAG, "draw forecast failed");
     return lcd_canvas_flush();
@@ -5496,7 +5863,7 @@ static esp_err_t draw_today_hourly_card(int x, int y, int w, int h,
     char hum_buf[12];
     int temp_x = 0;
 
-    snprintf(temp_buf, sizeof(temp_buf), "%dC", temp_c);
+    snprintf(temp_buf, sizeof(temp_buf), "%d" DEG_SIGN, temp_c);
     snprintf(hum_buf, sizeof(hum_buf), "RH%d%%", humidity);
     temp_x = x + w - text5_width(temp_buf, 2) - 9;
 
@@ -5613,9 +5980,9 @@ static esp_err_t draw_today_weather_screen(const struct tm *tm)
 static esp_err_t draw_komari_detail_row(int y, const char *label, const char *value,
                                         uint16_t label_color, uint16_t value_color)
 {
-    const uint16_t line = rgb565(30, 43, 66);
+    const uint16_t line = rgb565(26, 30, 50);
     const int x = CLOCK_PANEL_X + 18;
-    const int value_x = CLOCK_PANEL_X + 86;
+    const int value_x = CLOCK_PANEL_X + 80;
 
     ESP_RETURN_ON_ERROR(draw_text5(x, y + 1, label, 1, label_color), TAG, "draw komari label failed");
     ESP_RETURN_ON_ERROR(draw_text_mixed_limited(value_x, y, value != NULL ? value : "--",
@@ -5631,8 +5998,8 @@ static esp_err_t draw_komari_screen(const struct tm *tm)
     const uint16_t text = rgb565(232, 240, 255);
     const uint16_t muted = rgb565(145, 161, 196);
     const uint16_t accent = rgb565(255, 185, 85);
-    const uint16_t band_top = rgb565(34, 26, 20);
-    const uint16_t band_bottom = rgb565(50, 36, 26);
+    const uint16_t band_top = rgb565(30, 22, 22);
+    const uint16_t band_bottom = rgb565(84, 60, 36);
     char online_buf[24];
     char nodes_buf[16];
     char private_buf[8];
@@ -5678,50 +6045,113 @@ static esp_err_t draw_komari_screen(const struct tm *tm)
         }
     }
 
-    ESP_RETURN_ON_ERROR(draw_view_background(rgb565(8, 9, 22), rgb565(20, 17, 26)),
+    ESP_RETURN_ON_ERROR(draw_view_background(rgb565(8, 9, 24), rgb565(20, 16, 28)),
                         TAG, "draw komari bg failed");
-    ESP_RETURN_ON_ERROR(draw_view_header("KOMARI", tm), TAG, "draw komari header failed");
+    ESP_RETURN_ON_ERROR(draw_view_header("KOMARI", tm, accent), TAG, "draw komari header failed");
 
-    ESP_RETURN_ON_ERROR(lcd_fill_vertical_blend_rect(CLOCK_PANEL_X + 1, CLOCK_PANEL_Y + 43,
-                                                     CLOCK_PANEL_W - 2, 34,
-                                                     band_top, band_bottom),
-                        TAG, "draw komari band failed");
-    ESP_RETURN_ON_ERROR(draw_text5(CLOCK_PANEL_X + 20, CLOCK_PANEL_Y + 56,
-                                   "ONLINE", 1, muted),
+    // 在线概览卡片：左侧标签和进度条，右侧大号在线/总数。
+    const int card_x = CLOCK_PANEL_X + 10;
+    const int card_y = CLOCK_PANEL_Y + 42;
+    const int card_w = CLOCK_PANEL_W - 20;
+    const int card_h = 38;
+    ESP_RETURN_ON_ERROR(lcd_fill_round_rect(card_x, card_y, card_w, card_h, 8, band_bottom),
+                        TAG, "draw komari card border failed");
+    ESP_RETURN_ON_ERROR(lcd_fill_round_rect(card_x + 1, card_y + 1, card_w - 2, card_h - 2, 7, band_top),
+                        TAG, "draw komari card failed");
+    ESP_RETURN_ON_ERROR(lcd_fill_circle(card_x + 14, card_y + 13, 3,
+                                        komari.online_valid && komari.online_count > 0 ?
+                                        rgb565(76, 235, 142) : muted),
+                        TAG, "draw komari online dot failed");
+    ESP_RETURN_ON_ERROR(draw_text5(card_x + 24, card_y + 10, "ONLINE", 1, muted),
                         TAG, "draw komari online label failed");
-    ESP_RETURN_ON_ERROR(draw_text5(CLOCK_PANEL_X + CLOCK_PANEL_W - text5_width(online_buf, 3) - 22,
-                                   CLOCK_PANEL_Y + 49, online_buf, 3, accent),
+    const int bar_x = card_x + 12;
+    const int bar_w = 120;
+    ESP_RETURN_ON_ERROR(lcd_fill_round_rect(bar_x, card_y + 24, bar_w, 5, 2, rgb565(56, 42, 30)),
+                        TAG, "draw komari bar track failed");
+    if (komari.online_valid && komari.node_count > 0) {
+        int fill = (bar_w * komari.online_count) / komari.node_count;
+        if (fill > bar_w) {
+            fill = bar_w;
+        }
+        if (fill > 4) {
+            ESP_RETURN_ON_ERROR(lcd_fill_round_rect(bar_x, card_y + 24, fill, 5, 2, accent),
+                                TAG, "draw komari bar fill failed");
+        }
+    }
+    ESP_RETURN_ON_ERROR(draw_text5(card_x + card_w - text5_width(online_buf, 3) - 12,
+                                   card_y + 9, online_buf, 3, accent),
                         TAG, "draw komari online failed");
 
-    ESP_RETURN_ON_ERROR(draw_komari_detail_row(CLOCK_PANEL_Y + 84, "SITE",
+    ESP_RETURN_ON_ERROR(draw_komari_detail_row(CLOCK_PANEL_Y + 86, "SITE",
                                                komari.configured ? komari.sitename : "NOT SET",
                                                accent, text),
                         TAG, "draw komari site failed");
-    ESP_RETURN_ON_ERROR(draw_komari_detail_row(CLOCK_PANEL_Y + 99, "DESC",
+    ESP_RETURN_ON_ERROR(draw_komari_detail_row(CLOCK_PANEL_Y + 100, "DESC",
                                                komari.configured ? komari.description : "--",
                                                muted, text),
                         TAG, "draw komari desc failed");
     ESP_RETURN_ON_ERROR(draw_komari_detail_row(CLOCK_PANEL_Y + 114, "NODES",
                                                nodes_buf, muted, text),
                         TAG, "draw komari nodes failed");
-    ESP_RETURN_ON_ERROR(draw_komari_detail_row(CLOCK_PANEL_Y + 129, "THEME",
+    ESP_RETURN_ON_ERROR(draw_komari_detail_row(CLOCK_PANEL_Y + 128, "THEME",
                                                komari.configured ? komari.theme : "--",
                                                muted, text),
                         TAG, "draw komari theme failed");
-    ESP_RETURN_ON_ERROR(draw_komari_detail_row(CLOCK_PANEL_Y + 144, "VER",
+    ESP_RETURN_ON_ERROR(draw_komari_detail_row(CLOCK_PANEL_Y + 142, "VER",
                                                komari.configured ? komari.version : "--",
                                                muted, text),
                         TAG, "draw komari version failed");
-    ESP_RETURN_ON_ERROR(draw_komari_detail_row(CLOCK_PANEL_Y + 159, "PRIVATE",
+    ESP_RETURN_ON_ERROR(draw_komari_detail_row(CLOCK_PANEL_Y + 156, "PRIVATE",
                                                private_buf, muted, text),
                         TAG, "draw komari private failed");
-    ESP_RETURN_ON_ERROR(draw_komari_detail_row(CLOCK_PANEL_Y + 174, "RECORD",
+    ESP_RETURN_ON_ERROR(draw_komari_detail_row(CLOCK_PANEL_Y + 170, "RECORD",
                                                record_buf, muted, text),
                         TAG, "draw komari record failed");
-    ESP_RETURN_ON_ERROR(draw_komari_detail_row(CLOCK_PANEL_Y + 189, "UP",
+    ESP_RETURN_ON_ERROR(draw_komari_detail_row(CLOCK_PANEL_Y + 184, "UP",
                                                updated_buf, muted, text),
                         TAG, "draw komari update failed");
     return lcd_canvas_flush();
+}
+
+static esp_err_t draw_dialog_box(int x, int y, int w, int h, uint16_t accent)
+{
+    const uint16_t border = mix_color(rgb565(40, 56, 96), accent, 1, 3);
+    const uint16_t top = rgb565(18, 26, 54);
+    const uint16_t bottom = rgb565(8, 13, 32);
+
+    ESP_RETURN_ON_ERROR(lcd_fill_round_rect(x + 2, y + 4, w, h, 9, rgb565(2, 4, 12)),
+                        TAG, "draw dialog shadow failed");
+    ESP_RETURN_ON_ERROR(lcd_fill_round_rect(x, y, w, h, 9, border), TAG, "draw dialog border failed");
+    ESP_RETURN_ON_ERROR(lcd_fill_round_rect(x + 1, y + 1, w - 2, h - 2, 8, bottom),
+                        TAG, "draw dialog body failed");
+    for (int row = 0; row < h / 2; ++row) {
+        int inset = row < 8 ? 8 - (int)sqrtf((float)(64 - (8 - row) * (8 - row))) : 0;
+        ESP_RETURN_ON_ERROR(lcd_fill_rect(x + 1 + inset, y + 1 + row, w - 2 - inset * 2, 1,
+                                          mix_color(top, bottom, row, h / 2)),
+                            TAG, "draw dialog gradient failed");
+    }
+    return lcd_fill_round_rect(x + w / 2 - 18, y, 36, 2, 1, accent);
+}
+
+static esp_err_t draw_dialog_button(int x, int y, int w, int h, const char *label,
+                                    bool primary, uint16_t accent)
+{
+    const uint16_t dark = rgb565(15, 20, 30);
+    if (primary) {
+        ESP_RETURN_ON_ERROR(lcd_fill_round_rect(x, y, w, h, h / 2, accent), TAG, "draw button failed");
+        ESP_RETURN_ON_ERROR(lcd_fill_rect(x + h / 2, y + 1, w - h, 1, mix_color(accent, rgb565(255, 255, 255), 1, 2)),
+                            TAG, "draw button highlight failed");
+    } else {
+        ESP_RETURN_ON_ERROR(lcd_fill_round_rect(x, y, w, h, h / 2, mix_color(rgb565(30, 40, 70), accent, 1, 3)),
+                            TAG, "draw button border failed");
+        ESP_RETURN_ON_ERROR(lcd_fill_round_rect(x + 1, y + 1, w - 2, h - 2, h / 2 - 1, rgb565(16, 22, 44)),
+                            TAG, "draw button fill failed");
+    }
+    int text_w = text_mixed_width(label, 1);
+    bool ascii = label[0] != '\0' && ((unsigned char)label[0] & 0x80) == 0;
+    int text_y = ascii ? y + (h - 7) / 2 - 4 : y + (h - 16) / 2;
+    return draw_text_mixed_limited(x + (w - text_w) / 2, text_y, label, w - 8, 1,
+                                   primary ? dark : accent);
 }
 
 static esp_err_t draw_wifi_reprovision_confirm_screen(const struct tm *tm)
@@ -5729,43 +6159,35 @@ static esp_err_t draw_wifi_reprovision_confirm_screen(const struct tm *tm)
     const uint16_t text = rgb565(232, 240, 255);
     const uint16_t muted = rgb565(145, 161, 196);
     const uint16_t accent = rgb565(255, 211, 85);
-    const uint16_t border = rgb565(84, 116, 160);
-    const uint16_t box = rgb565(8, 14, 32);
-    const uint16_t yes_bg = rgb565(255, 196, 76);
-    const uint16_t no_bg = rgb565(36, 48, 78);
-    const uint16_t dark = rgb565(15, 20, 30);
+    const uint16_t cyan = rgb565(64, 235, 255);
 
     ESP_RETURN_ON_ERROR(draw_view_background(rgb565(5, 8, 22), rgb565(12, 18, 34)),
                         TAG, "draw wifi confirm bg failed");
-    ESP_RETURN_ON_ERROR(draw_view_header("WIFI", tm), TAG, "draw wifi confirm header failed");
+    ESP_RETURN_ON_ERROR(draw_view_header("WIFI", tm, cyan), TAG, "draw wifi confirm header failed");
 
-    ESP_RETURN_ON_ERROR(lcd_fill_round_rect(WIFI_CONFIRM_BOX_X, WIFI_CONFIRM_BOX_Y,
-                                            WIFI_CONFIRM_BOX_W, WIFI_CONFIRM_BOX_H, 8, border),
-                        TAG, "draw wifi confirm border failed");
-    ESP_RETURN_ON_ERROR(lcd_fill_round_rect(WIFI_CONFIRM_BOX_X + 2, WIFI_CONFIRM_BOX_Y + 2,
-                                            WIFI_CONFIRM_BOX_W - 4, WIFI_CONFIRM_BOX_H - 4, 7, box),
+    ESP_RETURN_ON_ERROR(draw_dialog_box(WIFI_CONFIRM_BOX_X, WIFI_CONFIRM_BOX_Y,
+                                        WIFI_CONFIRM_BOX_W, WIFI_CONFIRM_BOX_H, cyan),
                         TAG, "draw wifi confirm box failed");
-    ESP_RETURN_ON_ERROR(draw_text5_centered(160, WIFI_CONFIRM_BOX_Y + 22,
-                                            "SETUP WIFI?", 1, text),
+    ESP_RETURN_ON_ERROR(lcd_fill_circle(WIFI_CONFIRM_BOX_X + 30, WIFI_CONFIRM_BOX_Y + 28, 16,
+                                        mix_color(rgb565(12, 20, 44), cyan, 1, 5)),
+                        TAG, "draw wifi confirm icon bg failed");
+    ESP_RETURN_ON_ERROR(draw_wifi_icon(WIFI_CONFIRM_BOX_X + 18, WIFI_CONFIRM_BOX_Y + 19, true),
+                        TAG, "draw wifi confirm icon failed");
+    ESP_RETURN_ON_ERROR(draw_text5(WIFI_CONFIRM_BOX_X + 56, WIFI_CONFIRM_BOX_Y + 17,
+                                   "SETUP WIFI?", 1, text),
                         TAG, "draw wifi confirm title failed");
-    ESP_RETURN_ON_ERROR(draw_text5_centered(160, WIFI_CONFIRM_BOX_Y + 43,
-                                            "OPEN AP MODE", 1, muted),
+    ESP_RETURN_ON_ERROR(draw_text5(WIFI_CONFIRM_BOX_X + 56, WIFI_CONFIRM_BOX_Y + 33,
+                                   "OPEN AP MODE", 1, muted),
                         TAG, "draw wifi confirm body failed");
 
-    ESP_RETURN_ON_ERROR(lcd_fill_round_rect(WIFI_CONFIRM_YES_X, WIFI_CONFIRM_YES_Y,
-                                            WIFI_CONFIRM_BUTTON_W, WIFI_CONFIRM_BUTTON_H,
-                                            6, yes_bg),
+    ESP_RETURN_ON_ERROR(draw_dialog_button(WIFI_CONFIRM_YES_X, WIFI_CONFIRM_YES_Y,
+                                           WIFI_CONFIRM_BUTTON_W, WIFI_CONFIRM_BUTTON_H,
+                                           "YES", true, accent),
                         TAG, "draw wifi yes button failed");
-    ESP_RETURN_ON_ERROR(lcd_fill_round_rect(WIFI_CONFIRM_NO_X, WIFI_CONFIRM_NO_Y,
-                                            WIFI_CONFIRM_BUTTON_W, WIFI_CONFIRM_BUTTON_H,
-                                            6, no_bg),
+    ESP_RETURN_ON_ERROR(draw_dialog_button(WIFI_CONFIRM_NO_X, WIFI_CONFIRM_NO_Y,
+                                           WIFI_CONFIRM_BUTTON_W, WIFI_CONFIRM_BUTTON_H,
+                                           "NO", false, accent),
                         TAG, "draw wifi no button failed");
-    ESP_RETURN_ON_ERROR(draw_text5_centered(WIFI_CONFIRM_YES_X + WIFI_CONFIRM_BUTTON_W / 2,
-                                            WIFI_CONFIRM_YES_Y + 8, "YES", 1, dark),
-                        TAG, "draw wifi yes text failed");
-    ESP_RETURN_ON_ERROR(draw_text5_centered(WIFI_CONFIRM_NO_X + WIFI_CONFIRM_BUTTON_W / 2,
-                                            WIFI_CONFIRM_NO_Y + 8, "NO", 1, accent),
-                        TAG, "draw wifi no text failed");
     return lcd_canvas_flush();
 }
 
@@ -5836,7 +6258,7 @@ static void format_partition_label(const esp_partition_t *partition, char *out, 
 static esp_err_t draw_health_row(int x, int y, int w, const char *label, const char *value,
                                  uint16_t label_color, uint16_t value_color)
 {
-    const uint16_t line = rgb565(28, 42, 67);
+    const uint16_t line = rgb565(24, 34, 60);
     const int label_w = 38;
     const int value_x = x + 44;
     int value_w = w - (value_x - x);
@@ -5860,7 +6282,6 @@ static esp_err_t draw_health_screen(const struct tm *tm)
     const uint16_t accent = rgb565(94, 236, 218);
     const uint16_t warning = rgb565(255, 211, 85);
     const uint16_t button_bg = rgb565(255, 196, 76);
-    const uint16_t button_text = rgb565(15, 20, 30);
     const int full_x = CLOCK_PANEL_X + 16;
     const int full_w = CLOCK_PANEL_W - 32;
     const int full_y0 = CLOCK_PANEL_Y + 46;
@@ -5935,7 +6356,7 @@ static esp_err_t draw_health_screen(const struct tm *tm)
 
     ESP_RETURN_ON_ERROR(draw_view_background(rgb565(5, 9, 23), rgb565(9, 20, 33)),
                         TAG, "draw health bg failed");
-    ESP_RETURN_ON_ERROR(draw_view_header("设备状态", tm), TAG, "draw health header failed");
+    ESP_RETURN_ON_ERROR(draw_view_header("设备状态", tm, rgb565(94, 236, 218)), TAG, "draw health header failed");
 
     ESP_RETURN_ON_ERROR(draw_health_row(full_x, full_y0, full_w, "启动", uptime_buf, accent, text),
                         TAG, "draw uptime failed");
@@ -5965,14 +6386,10 @@ static esp_err_t draw_health_screen(const struct tm *tm)
                                         ota.status == OTA_STATUS_FAILED ? warning : text),
                         TAG, "draw ota state failed");
 
-    ESP_RETURN_ON_ERROR(lcd_fill_round_rect(HEALTH_OTA_HIT_X, HEALTH_OTA_HIT_Y,
-                                            HEALTH_OTA_HIT_W, HEALTH_OTA_HIT_H,
-                                            6, button_bg),
+    ESP_RETURN_ON_ERROR(draw_dialog_button(HEALTH_OTA_HIT_X, HEALTH_OTA_HIT_Y,
+                                           HEALTH_OTA_HIT_W, HEALTH_OTA_HIT_H,
+                                           "更新", true, button_bg),
                         TAG, "draw health ota button failed");
-    ESP_RETURN_ON_ERROR(draw_text_mixed_centered_limited(HEALTH_OTA_HIT_X + HEALTH_OTA_HIT_W / 2,
-                                                         HEALTH_OTA_HIT_Y + 4, "更新",
-                                                         HEALTH_OTA_HIT_W - 10, 1, button_text),
-                        TAG, "draw health ota button text failed");
     return lcd_canvas_flush();
 }
 
@@ -6059,12 +6476,9 @@ static esp_err_t draw_ota_confirm_screen(const struct tm *tm)
     const uint16_t muted = rgb565(145, 161, 196);
     const uint16_t accent = rgb565(255, 211, 85);
     const uint16_t border = rgb565(84, 116, 160);
-    const uint16_t box = rgb565(8, 14, 32);
     const uint16_t progress_track = rgb565(24, 36, 58);
     const uint16_t progress_fill = rgb565(94, 236, 218);
     const uint16_t yes_bg = rgb565(255, 196, 76);
-    const uint16_t no_bg = rgb565(36, 48, 78);
-    const uint16_t dark = rgb565(15, 20, 30);
     ota_info_t ota = {0};
     char url[OTA_URL_LEN] = {0};
     char source_buf[48];
@@ -6109,66 +6523,62 @@ static esp_err_t draw_ota_confirm_screen(const struct tm *tm)
 
     ESP_RETURN_ON_ERROR(draw_view_background(rgb565(5, 8, 22), rgb565(12, 18, 34)),
                         TAG, "draw ota confirm bg failed");
-    ESP_RETURN_ON_ERROR(draw_view_header("更新", tm), TAG, "draw ota confirm header failed");
+    ESP_RETURN_ON_ERROR(draw_view_header("更新", tm, accent), TAG, "draw ota confirm header failed");
 
-    ESP_RETURN_ON_ERROR(lcd_fill_round_rect(OTA_CONFIRM_BOX_X, OTA_CONFIRM_BOX_Y,
-                                            OTA_CONFIRM_BOX_W, OTA_CONFIRM_BOX_H, 8, border),
-                        TAG, "draw ota confirm border failed");
-    ESP_RETURN_ON_ERROR(lcd_fill_round_rect(OTA_CONFIRM_BOX_X + 2, OTA_CONFIRM_BOX_Y + 2,
-                                            OTA_CONFIRM_BOX_W - 4, OTA_CONFIRM_BOX_H - 4, 7, box),
+    const uint16_t box_accent = ota.status == OTA_STATUS_FAILED ? rgb565(255, 110, 120) :
+                                (ota.status == OTA_STATUS_IDLE ? accent : progress_fill);
+    const int inner_x = OTA_CONFIRM_BOX_X + 16;
+    const int inner_w = OTA_CONFIRM_BOX_W - 32;
+    ESP_RETURN_ON_ERROR(draw_dialog_box(OTA_CONFIRM_BOX_X, OTA_CONFIRM_BOX_Y,
+                                        OTA_CONFIRM_BOX_W, OTA_CONFIRM_BOX_H, box_accent),
                         TAG, "draw ota confirm box failed");
-    ESP_RETURN_ON_ERROR(draw_text_mixed_centered_limited(160, OTA_CONFIRM_BOX_Y + 18,
-                                                         title, OTA_CONFIRM_BOX_W - 36, 1, text),
+    ESP_RETURN_ON_ERROR(draw_text_mixed_centered_limited(160, OTA_CONFIRM_BOX_Y + 10,
+                                                         title, inner_w, 1, text),
                         TAG, "draw ota confirm title failed");
-    ESP_RETURN_ON_ERROR(draw_text_mixed_limited(OTA_CONFIRM_BOX_X + 18, OTA_CONFIRM_BOX_Y + 43,
-                                                status_buf, OTA_CONFIRM_BOX_W - 36, 1,
-                                                ota.status == OTA_STATUS_FAILED ? accent : muted),
+    ESP_RETURN_ON_ERROR(lcd_draw_hline(inner_x, OTA_CONFIRM_BOX_Y + 32, inner_w, rgb565(34, 46, 80)),
+                        TAG, "draw ota divider failed");
+    ESP_RETURN_ON_ERROR(lcd_fill_circle(inner_x + 4, OTA_CONFIRM_BOX_Y + 46, 3, box_accent),
+                        TAG, "draw ota status dot failed");
+    ESP_RETURN_ON_ERROR(draw_text_mixed_limited(inner_x + 12, OTA_CONFIRM_BOX_Y + 38,
+                                                status_buf, inner_w - 12, 1,
+                                                ota.status == OTA_STATUS_FAILED ? box_accent : text),
                         TAG, "draw ota status failed");
-    ESP_RETURN_ON_ERROR(draw_text_mixed_limited(OTA_CONFIRM_BOX_X + 18, OTA_CONFIRM_BOX_Y + 61,
-                                                source_buf, OTA_CONFIRM_BOX_W - 36, 1, muted),
+    ESP_RETURN_ON_ERROR(draw_text_mixed_limited(inner_x + 12, OTA_CONFIRM_BOX_Y + 56,
+                                                source_buf, inner_w - 12, 1, muted),
                         TAG, "draw ota source failed");
 
     if (ota.status == OTA_STATUS_RUNNING || ota.status == OTA_STATUS_SUCCESS) {
-        ESP_RETURN_ON_ERROR(draw_ota_progress_bar(OTA_CONFIRM_BOX_X + 18, OTA_CONFIRM_BOX_Y + 78,
-                                                  OTA_CONFIRM_BOX_W - 36, 12,
+        ESP_RETURN_ON_ERROR(draw_ota_progress_bar(inner_x, OTA_CONFIRM_BOX_Y + 80,
+                                                  inner_w, 12,
                                                   ota.status == OTA_STATUS_SUCCESS ? 100 :
                                                   ota.progress_percent,
                                                   border, progress_track, progress_fill),
                             TAG, "draw ota progress failed");
         if (percent_buf[0] != '\0') {
-            ESP_RETURN_ON_ERROR(draw_text5(CLOCK_PANEL_X + CLOCK_PANEL_W -
-                                           text5_width(percent_buf, 1) - 54,
-                                           OTA_CONFIRM_BOX_Y + 96, percent_buf, 1,
+            ESP_RETURN_ON_ERROR(draw_text5(inner_x + inner_w - text5_width(percent_buf, 1),
+                                           OTA_CONFIRM_BOX_Y + 100, percent_buf, 1,
                                            progress_fill),
                                 TAG, "draw ota percent failed");
         }
-        ESP_RETURN_ON_ERROR(draw_text_mixed_limited(OTA_CONFIRM_BOX_X + 18, OTA_CONFIRM_BOX_Y + 96,
-                                                    size_buf, OTA_CONFIRM_BOX_W - 36, 1, text),
+        ESP_RETURN_ON_ERROR(draw_text_mixed_limited(inner_x, OTA_CONFIRM_BOX_Y + 96,
+                                                    size_buf, inner_w - 40, 1, muted),
                             TAG, "draw ota size failed");
     } else {
-        ESP_RETURN_ON_ERROR(draw_text_mixed_centered_limited(160, OTA_CONFIRM_BOX_Y + 80,
-                                                             "下载重启",
-                                                             OTA_CONFIRM_BOX_W - 36, 1, muted),
+        int body_w = text_mixed_width("下载重启", 1);
+        ESP_RETURN_ON_ERROR(draw_text_mixed_limited(inner_x + inner_w - body_w, OTA_CONFIRM_BOX_Y + 38,
+                                                    "下载重启", body_w, 1, muted),
                             TAG, "draw ota confirm body failed");
     }
 
     if (show_buttons) {
-        ESP_RETURN_ON_ERROR(lcd_fill_round_rect(OTA_CONFIRM_YES_X, OTA_CONFIRM_YES_Y,
-                                                OTA_CONFIRM_BUTTON_W, OTA_CONFIRM_BUTTON_H,
-                                                6, yes_bg),
+        ESP_RETURN_ON_ERROR(draw_dialog_button(OTA_CONFIRM_YES_X, OTA_CONFIRM_YES_Y,
+                                               OTA_CONFIRM_BUTTON_W, OTA_CONFIRM_BUTTON_H,
+                                               left_button, true, yes_bg),
                             TAG, "draw ota yes button failed");
-        ESP_RETURN_ON_ERROR(lcd_fill_round_rect(OTA_CONFIRM_NO_X, OTA_CONFIRM_NO_Y,
-                                                OTA_CONFIRM_BUTTON_W, OTA_CONFIRM_BUTTON_H,
-                                                6, no_bg),
+        ESP_RETURN_ON_ERROR(draw_dialog_button(OTA_CONFIRM_NO_X, OTA_CONFIRM_NO_Y,
+                                               OTA_CONFIRM_BUTTON_W, OTA_CONFIRM_BUTTON_H,
+                                               "返回", false, accent),
                             TAG, "draw ota no button failed");
-        ESP_RETURN_ON_ERROR(draw_text_mixed_centered_limited(OTA_CONFIRM_YES_X + OTA_CONFIRM_BUTTON_W / 2,
-                                                             OTA_CONFIRM_YES_Y + 5, left_button,
-                                                             OTA_CONFIRM_BUTTON_W - 12, 1, dark),
-                            TAG, "draw ota yes text failed");
-        ESP_RETURN_ON_ERROR(draw_text_mixed_centered_limited(OTA_CONFIRM_NO_X + OTA_CONFIRM_BUTTON_W / 2,
-                                                             OTA_CONFIRM_NO_Y + 5, "返回",
-                                                             OTA_CONFIRM_BUTTON_W - 12, 1, accent),
-                            TAG, "draw ota no text failed");
     }
     return lcd_canvas_flush();
 }
@@ -7349,7 +7759,7 @@ static bool touch_poll_view_change(app_view_t *view)
                       CLOCK_PANEL_W - 56, 60)) {
         next_view = APP_VIEW_ANALOG_CLOCK;
     } else if (next_view == *view && *view == APP_VIEW_DASHBOARD &&
-               point_in_rect(x, y, CLOCK_PANEL_X + 14, CLOCK_PANEL_Y + 112, 150, 42)) {
+               point_in_rect(x, y, CLOCK_PANEL_X + 14, CLOCK_PANEL_Y + 112, 196, 42)) {
         next_view = APP_VIEW_CALENDAR;
     }
 
