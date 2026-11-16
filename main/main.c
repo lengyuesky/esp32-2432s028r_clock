@@ -11,6 +11,7 @@
 #include <unistd.h>
 
 #include "driver/gpio.h"
+#include "driver/ledc.h"
 #include "driver/spi_master.h"
 #include "esp_app_desc.h"
 #include "esp_check.h"
@@ -31,6 +32,7 @@
 #include "esp_ota_ops.h"
 #include "esp_partition.h"
 #include "esp_system.h"
+#include "esp_timer.h"
 #include "esp_tls_crypto.h"
 #include "esp_transport.h"
 #include "esp_transport_ssl.h"
@@ -149,6 +151,47 @@
 #define OTA_CONFIRM_BUTTON_H 26
 #define OTA_CONFIRM_NO_X (OTA_CONFIRM_BOX_X + OTA_CONFIRM_BOX_W - OTA_CONFIRM_BUTTON_W - 24)
 #define OTA_CONFIRM_NO_Y OTA_CONFIRM_YES_Y
+#define MORE_TILE_X0 (CLOCK_PANEL_X + 14)
+#define MORE_TILE_Y0 (CLOCK_PANEL_Y + 46)
+#define MORE_TILE_W 130
+#define MORE_TILE_H 68
+#define MORE_TILE_GAP 8
+#define MORE_TILE_COUNT 4
+#define TIMER_RING_CX (CLOCK_PANEL_X + 84)
+#define TIMER_RING_CY (CLOCK_PANEL_Y + 118)
+#define TIMER_RING_RADIUS 68
+#define TIMER_RING_THICKNESS 11
+#define TIMER_SIDE_X (CLOCK_PANEL_X + 168)
+#define TIMER_SIDE_W (CLOCK_PANEL_W - 168 - 14)
+#define TIMER_SIDE_GAP 6
+#define TIMER_SIDE_BUTTON_W ((TIMER_SIDE_W - TIMER_SIDE_GAP) / 2)
+#define TIMER_PRESET_Y0 (CLOCK_PANEL_Y + 46)
+#define TIMER_CONTROL_Y (CLOCK_PANEL_Y + 156)
+#define TIMER_CONTROL_H 30
+#define POMODORO_PRESET_H 48
+#define COUNTDOWN_PRESET_H 30
+#define COUNTDOWN_PRESET_GAP 5
+#define TIMER_ALERT_WAKE_MS 60000
+#define NIGHT_ROW_X (CLOCK_PANEL_X + 16)
+#define NIGHT_ROW_RIGHT (CLOCK_PANEL_X + CLOCK_PANEL_W - 14)
+#define NIGHT_TOGGLE_W 54
+#define NIGHT_TOGGLE_H 26
+#define NIGHT_TOGGLE_Y (CLOCK_PANEL_Y + 44)
+#define NIGHT_ROW_Y0 (CLOCK_PANEL_Y + 78)
+#define NIGHT_ROW_H 28
+#define NIGHT_ROW_GAP 4
+#define NIGHT_ROW_COUNT 3
+#define NIGHT_STEP_BUTTON_W 48
+#define NIGHT_MINUS_X (NIGHT_ROW_RIGHT - NIGHT_STEP_BUTTON_W * 2 - 6)
+#define NIGHT_PLUS_X (NIGHT_ROW_RIGHT - NIGHT_STEP_BUTTON_W)
+#define NIGHT_VALUE_CX (CLOCK_PANEL_X + 120)
+#define NIGHT_TOUCH_WAKE_MS 15000
+#define BACKLIGHT_LEDC_MODE LEDC_LOW_SPEED_MODE
+#define BACKLIGHT_LEDC_TIMER LEDC_TIMER_0
+#define BACKLIGHT_LEDC_CHANNEL LEDC_CHANNEL_0
+#define BACKLIGHT_LEDC_RESOLUTION LEDC_TIMER_10_BIT
+#define BACKLIGHT_LEDC_MAX_DUTY 1023
+#define BACKLIGHT_LEDC_FREQ_HZ 5000
 
 #ifndef CONFIG_CLOCK_PROV_ENABLE
 #define CONFIG_CLOCK_PROV_ENABLE 0
@@ -256,6 +299,10 @@ typedef enum {
     APP_VIEW_WEATHER,
     APP_VIEW_KOMARI,
     APP_VIEW_HEALTH,
+    APP_VIEW_MORE,
+    APP_VIEW_POMODORO,
+    APP_VIEW_COUNTDOWN,
+    APP_VIEW_NIGHT,
 } app_view_t;
 
 typedef enum {
@@ -412,6 +459,404 @@ static esp_reset_reason_t s_last_reset_reason = ESP_RST_UNKNOWN;
 
 static void start_weather_task_once(void);
 static void start_komari_task_once(void);
+
+// ---------------------------------------------------------------------------
+// 更多页小工具：番茄钟、倒计时和夜间模式的状态。
+// 这些状态只在主循环任务中读写（触摸、绘制和计时轮询都在同一任务），不需要加锁。
+// ---------------------------------------------------------------------------
+
+typedef enum {
+    POMODORO_PHASE_FOCUS = 0,
+    POMODORO_PHASE_SHORT_BREAK,
+    POMODORO_PHASE_LONG_BREAK,
+} pomodoro_phase_t;
+
+typedef struct {
+    int64_t duration_us;
+    int64_t remaining_us;
+    int64_t deadline_us;
+    bool running;
+    bool finished;
+} focus_timer_t;
+
+typedef struct {
+    const char *label;
+    int minutes;
+    pomodoro_phase_t phase;
+} pomodoro_preset_t;
+
+typedef struct {
+    bool enabled;
+    uint8_t start_hour;
+    uint8_t end_hour;
+    uint8_t dim_percent;
+} night_mode_config_t;
+
+static const pomodoro_preset_t s_pomodoro_presets[] = {
+    {"专注", 25, POMODORO_PHASE_FOCUS},
+    {"专注", 50, POMODORO_PHASE_FOCUS},
+    {"短休", 5, POMODORO_PHASE_SHORT_BREAK},
+    {"长休", 15, POMODORO_PHASE_LONG_BREAK},
+};
+#define POMODORO_PRESET_COUNT ((int)(sizeof(s_pomodoro_presets) / sizeof(s_pomodoro_presets[0])))
+#define POMODORO_ROUNDS_PER_LONG_BREAK 4
+
+static const int s_countdown_presets[] = {1, 3, 5, 10, 30, 60};
+#define COUNTDOWN_PRESET_COUNT ((int)(sizeof(s_countdown_presets) / sizeof(s_countdown_presets[0])))
+
+static const uint8_t s_night_dim_levels[] = {0, 2, 5, 10, 20, 40};
+#define NIGHT_DIM_LEVEL_COUNT ((int)(sizeof(s_night_dim_levels) / sizeof(s_night_dim_levels[0])))
+
+static focus_timer_t s_pomodoro_timer;
+static focus_timer_t s_countdown_timer;
+static int s_pomodoro_preset = 0;
+static int s_pomodoro_completed;
+static int s_countdown_minutes = 5;
+static night_mode_config_t s_night = {
+    .enabled = false,
+    .start_hour = 22,
+    .end_hour = 7,
+    .dim_percent = 5,
+};
+static bool s_backlight_ready;
+static int s_backlight_percent = -1;
+static int64_t s_backlight_wake_until_us;
+
+static int64_t focus_timer_remaining_us(const focus_timer_t *timer)
+{
+    if (!timer->running) {
+        return timer->remaining_us > 0 ? timer->remaining_us : 0;
+    }
+    int64_t left = timer->deadline_us - esp_timer_get_time();
+    return left > 0 ? left : 0;
+}
+
+static int focus_timer_remaining_seconds(const focus_timer_t *timer)
+{
+    return (int)((focus_timer_remaining_us(timer) + 999999) / 1000000);
+}
+
+static float focus_timer_fraction(const focus_timer_t *timer)
+{
+    if (timer->duration_us <= 0) {
+        return 0.0f;
+    }
+    float fraction = (float)focus_timer_remaining_us(timer) / (float)timer->duration_us;
+    if (fraction < 0.0f) {
+        fraction = 0.0f;
+    } else if (fraction > 1.0f) {
+        fraction = 1.0f;
+    }
+    return fraction;
+}
+
+static bool focus_timer_is_paused(const focus_timer_t *timer)
+{
+    return !timer->running && !timer->finished && timer->remaining_us > 0 &&
+           timer->remaining_us < timer->duration_us;
+}
+
+static void focus_timer_set(focus_timer_t *timer, int minutes)
+{
+    timer->duration_us = (int64_t)minutes * 60LL * 1000000LL;
+    timer->remaining_us = timer->duration_us;
+    timer->deadline_us = 0;
+    timer->running = false;
+    timer->finished = false;
+}
+
+static void focus_timer_start(focus_timer_t *timer)
+{
+    if (timer->duration_us <= 0 || timer->running) {
+        return;
+    }
+    if (timer->remaining_us <= 0) {
+        timer->remaining_us = timer->duration_us;
+    }
+    timer->deadline_us = esp_timer_get_time() + timer->remaining_us;
+    timer->running = true;
+    timer->finished = false;
+}
+
+static void focus_timer_pause(focus_timer_t *timer)
+{
+    if (!timer->running) {
+        return;
+    }
+    timer->remaining_us = focus_timer_remaining_us(timer);
+    timer->running = false;
+}
+
+static void focus_timer_toggle(focus_timer_t *timer)
+{
+    if (timer->running) {
+        focus_timer_pause(timer);
+    } else {
+        focus_timer_start(timer);
+    }
+}
+
+static void focus_timer_reset(focus_timer_t *timer)
+{
+    timer->remaining_us = timer->duration_us;
+    timer->running = false;
+    timer->finished = false;
+}
+
+static bool focus_timer_poll_finished(focus_timer_t *timer)
+{
+    if (!timer->running || esp_timer_get_time() < timer->deadline_us) {
+        return false;
+    }
+    timer->running = false;
+    timer->remaining_us = 0;
+    timer->finished = true;
+    return true;
+}
+
+static void format_timer_mmss(int seconds, char *out, size_t out_len)
+{
+    if (seconds < 0) {
+        seconds = 0;
+    }
+    snprintf(out, out_len, "%02d:%02d", seconds / 60, seconds % 60);
+}
+
+static void pomodoro_apply_preset(int index, bool start)
+{
+    if (index < 0 || index >= POMODORO_PRESET_COUNT) {
+        return;
+    }
+    s_pomodoro_preset = index;
+    focus_timer_set(&s_pomodoro_timer, s_pomodoro_presets[index].minutes);
+    if (start) {
+        focus_timer_start(&s_pomodoro_timer);
+    }
+}
+
+static pomodoro_phase_t pomodoro_phase(void)
+{
+    return s_pomodoro_presets[s_pomodoro_preset].phase;
+}
+
+static void pomodoro_on_finished(void)
+{
+    // 专注结束后自动准备休息（每 4 轮一次长休），休息结束后准备下一轮 25 分钟专注。
+    int next = 0;
+    if (pomodoro_phase() == POMODORO_PHASE_FOCUS) {
+        ++s_pomodoro_completed;
+        next = (s_pomodoro_completed % POMODORO_ROUNDS_PER_LONG_BREAK) == 0 ? 3 : 2;
+    }
+    pomodoro_apply_preset(next, false);
+    s_pomodoro_timer.finished = true;
+    ESP_LOGI(TAG, "pomodoro finished, completed=%d next=%s %dmin", s_pomodoro_completed,
+             next == 0 ? "focus" : "break", s_pomodoro_presets[next].minutes);
+}
+
+static void countdown_apply_minutes(int minutes, bool start)
+{
+    s_countdown_minutes = minutes;
+    focus_timer_set(&s_countdown_timer, minutes);
+    if (start) {
+        focus_timer_start(&s_countdown_timer);
+    }
+}
+
+static void focus_tools_init(void)
+{
+    pomodoro_apply_preset(0, false);
+    countdown_apply_minutes(s_countdown_minutes, false);
+}
+
+static bool night_hour_in_range(int hour, int start_hour, int end_hour)
+{
+    if (start_hour == end_hour) {
+        return false;
+    }
+    if (start_hour < end_hour) {
+        return hour >= start_hour && hour < end_hour;
+    }
+    return hour >= start_hour || hour < end_hour;
+}
+
+static bool night_mode_active(const struct tm *tm)
+{
+    return s_night.enabled && tm != NULL &&
+           night_hour_in_range(tm->tm_hour, s_night.start_hour, s_night.end_hour);
+}
+
+static int night_dim_level_index(void)
+{
+    for (int i = 0; i < NIGHT_DIM_LEVEL_COUNT; ++i) {
+        if (s_night_dim_levels[i] >= s_night.dim_percent) {
+            return i;
+        }
+    }
+    return NIGHT_DIM_LEVEL_COUNT - 1;
+}
+
+static esp_err_t night_config_load(void)
+{
+    nvs_handle_t nvs = 0;
+    esp_err_t ret = nvs_open("night_cfg", NVS_READONLY, &nvs);
+    if (ret == ESP_ERR_NVS_NOT_FOUND) {
+        return ESP_OK;
+    }
+    ESP_RETURN_ON_ERROR(ret, TAG, "open night NVS failed");
+
+    uint8_t value = 0;
+    if (nvs_get_u8(nvs, "enabled", &value) == ESP_OK) {
+        s_night.enabled = value != 0;
+    }
+    if (nvs_get_u8(nvs, "start", &value) == ESP_OK && value < 24) {
+        s_night.start_hour = value;
+    }
+    if (nvs_get_u8(nvs, "end", &value) == ESP_OK && value < 24) {
+        s_night.end_hour = value;
+    }
+    if (nvs_get_u8(nvs, "dim", &value) == ESP_OK && value <= 100) {
+        s_night.dim_percent = value;
+    }
+    nvs_close(nvs);
+    ESP_LOGI(TAG, "night mode config: enabled=%d %02d:00-%02d:00 dim=%d%%",
+             s_night.enabled, s_night.start_hour, s_night.end_hour, s_night.dim_percent);
+    return ESP_OK;
+}
+
+static void night_config_save(void)
+{
+    nvs_handle_t nvs = 0;
+    esp_err_t ret = nvs_open("night_cfg", NVS_READWRITE, &nvs);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "open night NVS failed: %s", esp_err_to_name(ret));
+        return;
+    }
+    ret = nvs_set_u8(nvs, "enabled", s_night.enabled ? 1 : 0);
+    if (ret == ESP_OK) {
+        ret = nvs_set_u8(nvs, "start", s_night.start_hour);
+    }
+    if (ret == ESP_OK) {
+        ret = nvs_set_u8(nvs, "end", s_night.end_hour);
+    }
+    if (ret == ESP_OK) {
+        ret = nvs_set_u8(nvs, "dim", s_night.dim_percent);
+    }
+    if (ret == ESP_OK) {
+        ret = nvs_commit(nvs);
+    }
+    nvs_close(nvs);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "save night config failed: %s", esp_err_to_name(ret));
+    }
+}
+
+static void backlight_gpio_fallback(bool on)
+{
+    int level = on ? 1 : 0;
+    if (!CONFIG_CLOCK_LCD_BACKLIGHT_ACTIVE_HIGH) {
+        level = !level;
+    }
+    gpio_set_level(CONFIG_CLOCK_LCD_PIN_BACKLIGHT, level);
+}
+
+static void backlight_apply_percent(int percent)
+{
+    if (percent < 0) {
+        percent = 0;
+    } else if (percent > 100) {
+        percent = 100;
+    }
+    if (!s_backlight_ready) {
+        // 没有 PWM 时只能整屏开/关：非零亮度一律视为全亮。
+        percent = percent > 0 ? 100 : 0;
+    }
+    if (percent == s_backlight_percent) {
+        return;
+    }
+    s_backlight_percent = percent;
+    if (!s_backlight_ready) {
+        backlight_gpio_fallback(percent > 0);
+        return;
+    }
+    uint32_t duty = (uint32_t)((percent * BACKLIGHT_LEDC_MAX_DUTY + 50) / 100);
+    esp_err_t ret = ledc_set_duty(BACKLIGHT_LEDC_MODE, BACKLIGHT_LEDC_CHANNEL, duty);
+    if (ret == ESP_OK) {
+        ret = ledc_update_duty(BACKLIGHT_LEDC_MODE, BACKLIGHT_LEDC_CHANNEL);
+    }
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "set backlight duty failed: %s", esp_err_to_name(ret));
+    }
+}
+
+static esp_err_t backlight_init(void)
+{
+    ledc_timer_config_t timer_config = {
+        .speed_mode = BACKLIGHT_LEDC_MODE,
+        .duty_resolution = BACKLIGHT_LEDC_RESOLUTION,
+        .timer_num = BACKLIGHT_LEDC_TIMER,
+        .freq_hz = BACKLIGHT_LEDC_FREQ_HZ,
+        .clk_cfg = LEDC_AUTO_CLK,
+    };
+    ESP_RETURN_ON_ERROR(ledc_timer_config(&timer_config), TAG, "backlight LEDC timer config failed");
+
+    ledc_channel_config_t channel_config = {
+        .gpio_num = CONFIG_CLOCK_LCD_PIN_BACKLIGHT,
+        .speed_mode = BACKLIGHT_LEDC_MODE,
+        .channel = BACKLIGHT_LEDC_CHANNEL,
+        .intr_type = LEDC_INTR_DISABLE,
+        .timer_sel = BACKLIGHT_LEDC_TIMER,
+        .duty = BACKLIGHT_LEDC_MAX_DUTY,
+        .hpoint = 0,
+        .flags.output_invert = CONFIG_CLOCK_LCD_BACKLIGHT_ACTIVE_HIGH ? 0 : 1,
+    };
+    ESP_RETURN_ON_ERROR(ledc_channel_config(&channel_config), TAG, "backlight LEDC channel config failed");
+    s_backlight_ready = true;
+    s_backlight_percent = 100;
+    ESP_LOGI(TAG, "backlight PWM ready on GPIO%d", CONFIG_CLOCK_LCD_PIN_BACKLIGHT);
+    return ESP_OK;
+}
+
+static void backlight_wake(int duration_ms)
+{
+    int64_t until = esp_timer_get_time() + (int64_t)duration_ms * 1000LL;
+    if (until > s_backlight_wake_until_us) {
+        s_backlight_wake_until_us = until;
+    }
+    backlight_apply_percent(100);
+}
+
+static bool backlight_is_dimmed(void)
+{
+    return s_backlight_percent >= 0 && s_backlight_percent < 100;
+}
+
+static bool backlight_handle_touch_wake(void)
+{
+    // 夜间背光被调暗时，第一次点击只负责点亮屏幕，避免盲点误触进入其它页面。
+    bool was_dimmed = backlight_is_dimmed();
+    if (was_dimmed || s_backlight_wake_until_us > esp_timer_get_time()) {
+        backlight_wake(NIGHT_TOUCH_WAKE_MS);
+    }
+    return was_dimmed;
+}
+
+static void backlight_update(const struct tm *tm)
+{
+    int target = 100;
+    if (night_mode_active(tm) && esp_timer_get_time() >= s_backlight_wake_until_us) {
+        target = s_night.dim_percent;
+    }
+    if (s_backlight_percent < 0 || target >= s_backlight_percent) {
+        backlight_apply_percent(target);
+        return;
+    }
+    // 调暗时逐步过渡，避免背光突然熄灭。
+    int step = (s_backlight_percent - target + 3) / 4;
+    if (step < 1) {
+        step = 1;
+    }
+    backlight_apply_percent(s_backlight_percent - step);
+}
 
 static const char s_captive_portal_uri[] = "http://" PROV_AP_IP_ADDR "/";
 
@@ -1163,6 +1608,37 @@ static const zh16_glyph_t zh16_glyphs[] = {
     {"锁", {0x31B6, 0x3EB4, 0x60B8, 0x4030, 0x3DFC, 0x1984, 0x11B4, 0x19B4, 0x7FB4, 0x11A4, 0x11A4, 0x1164, 0x1CD8, 0x198E, 0x0302, 0x0000}},
     {"死", {0x7FFE, 0x0840, 0x1840, 0x1F44, 0x314E, 0x2178, 0x7370, 0x5A60, 0x0E40, 0x0640, 0x0C42, 0x1842, 0x3062, 0x607E, 0x0000, 0x0000}},
     {"知", {0x3000, 0x207E, 0x7F46, 0x6846, 0x4846, 0x0846, 0x7FC6, 0x0846, 0x0846, 0x1C46, 0x1646, 0x3346, 0x317E, 0x6046, 0x4000, 0x0000}},
+    {"自", {0x0300, 0x0600, 0x3FF8, 0x2008, 0x2008, 0x3FF8, 0x2008, 0x2008, 0x3FF8, 0x2008, 0x2008, 0x2008, 0x3FF8, 0x2008, 0x0000, 0x0000}},
+    {"调", {0x43FC, 0x4244, 0x2244, 0x03F4, 0x0244, 0x8244, 0x2204, 0x22E4, 0x22B4, 0x22B4, 0x2AF4, 0x3204, 0x3404, 0x2C04, 0x1818, 0x0000}},
+    {"暗", {0x0040, 0x7BFC, 0x4908, 0x4918, 0x4890, 0x4890, 0x7BFE, 0x4800, 0x49F8, 0x4908, 0x4908, 0x79F8, 0x0108, 0x01F8, 0x0108, 0x0000}},
+    {"番", {0x3FA0, 0x0120, 0x0920, 0x0D40, 0x7FFC, 0x0780, 0x0D60, 0x313C, 0xFFF4, 0x1110, 0x1FF0, 0x1110, 0x1110, 0x1FF0, 0x1010, 0x0000}},
+    {"茄", {0x0860, 0x0860, 0xFFFE, 0x0860, 0x1000, 0x1000, 0xFE44, 0x1244, 0x1244, 0x1244, 0x3244, 0x2244, 0x627C, 0x4244, 0x8C44, 0x0000}},
+    {"钟", {0x3010, 0x3010, 0x2010, 0x3E10, 0x6092, 0x7E92, 0xD092, 0x1092, 0x7EFE, 0x1092, 0x1010, 0x1410, 0x1810, 0x1010, 0x0010, 0x0000}},
+    {"倒", {0x0BF2, 0x0882, 0x110A, 0x134A, 0x33EA, 0x762A, 0x508A, 0x108A, 0x17EA, 0x108A, 0x1082, 0x17C2, 0x1402, 0x1006, 0x0000, 0x0000}},
+    {"计", {0x4020, 0x2020, 0x1020, 0x0020, 0x0020, 0xE3FE, 0x2020, 0x2020, 0x2020, 0x2020, 0x2820, 0x3020, 0x3020, 0x2020, 0x0020, 0x0000}},
+    {"夜", {0x0100, 0x7FFE, 0x0880, 0x0980, 0x19F8, 0x1308, 0x33C8, 0x7550, 0x5C90, 0x10E0, 0x1060, 0x10E0, 0x1198, 0x1E0E, 0x1000, 0x0000}},
+    {"模", {0x1088, 0x1088, 0x13FE, 0x1088, 0x31FC, 0x3104, 0x39FC, 0x3D04, 0x71FC, 0x5020, 0x93FE, 0x1070, 0x10C8, 0x1186, 0x1200, 0x0000}},
+    {"式", {0x0050, 0x0058, 0x0048, 0x7FFE, 0x0040, 0x0040, 0x7F40, 0x0840, 0x0820, 0x0820, 0x08B0, 0x0F12, 0xF00E, 0x0006, 0x0000, 0x0000}},
+    {"专", {0x0100, 0x0300, 0x3FF8, 0x0200, 0x0200, 0xFFFE, 0x0400, 0x07F8, 0x0030, 0x0060, 0x06C0, 0x0380, 0x00C0, 0x0060, 0x0000, 0x0000}},
+    {"注", {0x6080, 0x3040, 0x1000, 0x07FC, 0xC040, 0x6040, 0x0040, 0x1040, 0x17FC, 0x2040, 0x2040, 0x2040, 0x6040, 0x4FFE, 0x0000, 0x0000}},
+    {"短", {0x1000, 0x11FE, 0x3E00, 0x28FC, 0x4884, 0x0884, 0x7E84, 0x08FC, 0x0880, 0x0C8C, 0x16C8, 0x1248, 0x2058, 0x61FF, 0x0000, 0x0000}},
+    {"休", {0x1040, 0x1040, 0x1040, 0x2040, 0x27FC, 0x60E0, 0xE0E0, 0xA1E0, 0x2150, 0x2258, 0x264C, 0x2C46, 0x2840, 0x2040, 0x2040, 0x0000}},
+    {"长", {0x0810, 0x0830, 0x0860, 0x08C0, 0x0B00, 0x0E00, 0xFFFE, 0x0980, 0x0880, 0x0840, 0x0820, 0x0818, 0x0B0E, 0x0C02, 0x0000, 0x0000}},
+    {"暂", {0x0800, 0xFF7C, 0x1040, 0x2440, 0x3F4C, 0x0D44, 0x7C44, 0x0484, 0x0100, 0x1FF8, 0x1008, 0x1FF8, 0x1008, 0x1FF8, 0x1008, 0x0000}},
+    {"停", {0x1080, 0x17FC, 0x1000, 0x23F8, 0x2208, 0x63F8, 0xE000, 0xAFFE, 0x2802, 0x23F8, 0x2040, 0x2040, 0x2040, 0x2040, 0x2180, 0x0000}},
+    {"继", {0x0010, 0x1010, 0x1152, 0x2154, 0x6D74, 0x5910, 0x59FE, 0x1138, 0x213C, 0x6174, 0x7152, 0x0192, 0x0D10, 0x7110, 0x01FE, 0x0000}},
+    {"续", {0x1020, 0x21FC, 0x2020, 0x4BFE, 0xF804, 0x10D0, 0x2030, 0x6110, 0x7090, 0x07FE, 0x0C38, 0x7064, 0x01C2, 0x0302, 0x0000, 0x0000}},
+    {"置", {0x7FFC, 0x4444, 0x66CC, 0x7FFC, 0x0100, 0x0100, 0x1FF0, 0x1010, 0x1FF0, 0x1010, 0x1FF0, 0x1010, 0x1010, 0xFFFE, 0x0000, 0x0000}},
+    {"结", {0x1010, 0x3010, 0x21FE, 0x4C10, 0x7810, 0x11FE, 0x2000, 0x64FC, 0x7084, 0x0084, 0x0C84, 0x7084, 0x00FC, 0x0084, 0x0000, 0x0000}},
+    {"束", {0x0080, 0x0080, 0x7FFE, 0x0080, 0x1FF8, 0x1088, 0x1088, 0x1088, 0x1FF8, 0x01C0, 0x02C0, 0x0CB0, 0x708C, 0x4080, 0x0080, 0x0000}},
+    {"亮", {0x0180, 0x7FFE, 0x0000, 0x0FF0, 0x0810, 0x0FF0, 0x0000, 0x7FFE, 0x4002, 0x47E2, 0x0420, 0x0420, 0x0822, 0x3822, 0x603E, 0x0000}},
+    {"屏", {0x1FFC, 0x1004, 0x1004, 0x1FFC, 0x1310, 0x1190, 0x17FC, 0x1110, 0x1110, 0x1FFE, 0x1110, 0x3110, 0x2210, 0x6610, 0x0C10, 0x0000}},
+    {"生", {0x0000, 0x0080, 0x0880, 0x1880, 0x1880, 0x1FFC, 0x3080, 0x2080, 0x6080, 0x5FFC, 0x0080, 0x0080, 0x0080, 0x0080, 0x7FFF, 0x0000}},
+    {"效", {0x1040, 0x1840, 0x0840, 0x7FFE, 0x24C8, 0x26C8, 0x4748, 0xC748, 0x2C30, 0x3830, 0x0830, 0x1C38, 0x10CC, 0x6186, 0x4100, 0x0000}},
+    {"轻", {0x3000, 0x21F8, 0xFC10, 0x6030, 0x5070, 0x5058, 0x508C, 0xFF02, 0x1200, 0x11FC, 0x3C20, 0x9020, 0x1020, 0x13FE, 0x1000, 0x0000}},
+    {"触", {0x2010, 0x7810, 0x4810, 0xFCFC, 0xD494, 0x5494, 0x7C94, 0x54FC, 0x7C94, 0x5414, 0x5416, 0x5416, 0xD5F2, 0x9C00, 0x1000, 0x0000}},
+    {"幕", {0x0620, 0x7FFF, 0x0420, 0x0FF8, 0x0808, 0x0FF8, 0x0808, 0x0300, 0x7FFE, 0x0498, 0x1FFC, 0x788B, 0x4888, 0x0890, 0x0080, 0x0000}},
+    {"起", {0x08F8, 0x0808, 0x3E08, 0x0808, 0x08F8, 0x7E80, 0x0880, 0x2884, 0x2E84, 0x2884, 0x2878, 0x3800, 0x4E00, 0x43FC, 0x0000, 0x0000}},
 };
 
 static const uint8_t *font_for_char(char ch)
@@ -4960,6 +5436,14 @@ static esp_err_t draw_card_icon(int kind, int cx, int cy, uint16_t accent, int h
         ESP_RETURN_ON_ERROR(lcd_fill_rect(cx - 4, cy - 9, 2, 5, white), TAG, "draw calendar pin failed");
         return lcd_fill_rect(cx + 3, cy - 9, 2, 5, white);
     }
+    if (kind == 4) {
+        // 更多：2x2 小方块网格，右下角用白色点出"应用"感。
+        ESP_RETURN_ON_ERROR(lcd_fill_circle(cx, cy, bg_radius, icon_bg), TAG, "draw more icon bg failed");
+        ESP_RETURN_ON_ERROR(lcd_fill_round_rect(cx - 6, cy - 6, 5, 5, 1, accent), TAG, "draw more icon failed");
+        ESP_RETURN_ON_ERROR(lcd_fill_round_rect(cx + 1, cy - 6, 5, 5, 1, accent), TAG, "draw more icon failed");
+        ESP_RETURN_ON_ERROR(lcd_fill_round_rect(cx - 6, cy + 1, 5, 5, 1, accent), TAG, "draw more icon failed");
+        return lcd_fill_round_rect(cx + 1, cy + 1, 5, 5, 1, white);
+    }
     if (kind == 3) {
         ESP_RETURN_ON_ERROR(lcd_fill_circle(cx, cy, bg_radius, icon_bg), TAG, "draw komari icon bg failed");
         ESP_RETURN_ON_ERROR(lcd_fill_circle(cx - 5, cy - 3, 2, accent), TAG, "draw komari node failed");
@@ -5057,7 +5541,7 @@ static app_view_t nav_card_target_view(int index, bool show_komari)
 {
     switch (index) {
     case 0:
-        return APP_VIEW_ANALOG_CLOCK;
+        return APP_VIEW_MORE;
     case 1:
         return show_komari ? APP_VIEW_WEATHER : APP_VIEW_CALENDAR;
     case 2:
@@ -5070,7 +5554,7 @@ static app_view_t nav_card_target_view(int index, bool show_komari)
 static esp_err_t draw_nav_cards(const struct tm *tm, app_view_t current_view,
                                 const weather_info_t *weather)
 {
-    char card_time_buf[32];
+    char more_buf[16];
     char short_date_buf[32];
     char hum_buf[16];
     char komari_buf[16];
@@ -5081,7 +5565,14 @@ static esp_err_t draw_nav_cards(const struct tm *tm, app_view_t current_view,
     int card_count = nav_card_count(show_komari);
     komari_info_t komari = {0};
 
-    snprintf(card_time_buf, sizeof(card_time_buf), "%02d:%02d", tm->tm_hour, tm->tm_min);
+    // 更多卡片：有计时在运行时直接显示剩余时间，否则显示省略号。
+    if (s_pomodoro_timer.running) {
+        format_timer_mmss(focus_timer_remaining_seconds(&s_pomodoro_timer), more_buf, sizeof(more_buf));
+    } else if (s_countdown_timer.running) {
+        format_timer_mmss(focus_timer_remaining_seconds(&s_countdown_timer), more_buf, sizeof(more_buf));
+    } else {
+        strlcpy(more_buf, "...", sizeof(more_buf));
+    }
     snprintf(short_date_buf, sizeof(short_date_buf), "%02d/%02d", tm->tm_mon + 1, tm->tm_mday);
     if (weather != NULL && weather->valid) {
         snprintf(hum_buf, sizeof(hum_buf), "%d%%", weather->humidity);
@@ -5107,11 +5598,11 @@ static esp_err_t draw_nav_cards(const struct tm *tm, app_view_t current_view,
 
     nav_card_rect(0, card_count, &card_x, &card_w);
     ESP_RETURN_ON_ERROR(draw_metric_card(card_x, NAV_CARD_Y, card_w, NAV_CARD_H,
-                                         "时间", card_time_buf, NAV_CARD_VALUE_SCALE,
-                                         nav_accent(current_view, APP_VIEW_ANALOG_CLOCK,
+                                         "更多", more_buf, NAV_CARD_VALUE_SCALE,
+                                         nav_accent(current_view, APP_VIEW_MORE,
                                                     rgb565(45, 147, 255), rgb565(105, 207, 255)),
-                                         0, -1),
-                        TAG, "draw time nav failed");
+                                         4, -1),
+                        TAG, "draw more nav failed");
     if (!show_komari) {
         nav_card_rect(1, card_count, &card_x, &card_w);
         ESP_RETURN_ON_ERROR(draw_metric_card(card_x, NAV_CARD_Y, card_w, NAV_CARD_H,
@@ -5127,7 +5618,7 @@ static esp_err_t draw_nav_cards(const struct tm *tm, app_view_t current_view,
                                          "湿度", hum_buf, NAV_CARD_VALUE_SCALE,
                                          nav_accent(current_view, APP_VIEW_WEATHER,
                                                     rgb565(30, 226, 214), rgb565(95, 255, 221)),
-                                         show_komari ? 1 : 2, humidity),
+                                         2, humidity),
                         TAG, "draw humidity nav failed");
     if (!show_komari) {
         return ESP_OK;
@@ -5138,7 +5629,7 @@ static esp_err_t draw_nav_cards(const struct tm *tm, app_view_t current_view,
                             "KOMARI", komari_buf, NAV_CARD_VALUE_SCALE,
                             nav_accent(current_view, APP_VIEW_KOMARI,
                                        rgb565(255, 185, 85), rgb565(255, 220, 125)),
-                            2, -1);
+                            3, -1);
 }
 
 static esp_err_t draw_location_pin(int cx, int cy, uint16_t color, uint16_t hole)
@@ -6583,6 +7074,635 @@ static esp_err_t draw_ota_confirm_screen(const struct tm *tm)
     return lcd_canvas_flush();
 }
 
+// ---------------------------------------------------------------------------
+// 更多页与小工具页面绘制。
+// ---------------------------------------------------------------------------
+
+static int clamp_int(int value, int min_value, int max_value);
+static bool point_in_rect(int x, int y, int rect_x, int rect_y, int rect_w, int rect_h);
+
+static void canvas_blend_pixel(int x, int y, uint16_t color, int alpha)
+{
+    if (alpha <= 0 || !lcd_canvas_is_active()) {
+        return;
+    }
+    const int local_x = x - s_lcd.canvas_x;
+    const int local_y = y - s_lcd.canvas_y;
+    if (local_x < 0 || local_y < 0 || local_x >= s_lcd.canvas_w || local_y >= s_lcd.canvas_h) {
+        return;
+    }
+    uint16_t *pixel = s_lcd.canvas_buf + (size_t)local_y * (size_t)s_lcd.canvas_w + (size_t)local_x;
+    *pixel = alpha >= 255 ? color : mix_color(*pixel, color, alpha, 255);
+}
+
+static esp_err_t draw_aa_disc(float cx, float cy, float radius, uint16_t color)
+{
+    ESP_RETURN_ON_FALSE(lcd_canvas_is_active(), ESP_ERR_INVALID_STATE, TAG, "AA disc needs canvas");
+    const int x0 = (int)floorf(cx - radius - 1.0f);
+    const int x1 = (int)ceilf(cx + radius + 1.0f);
+    const int y0 = (int)floorf(cy - radius - 1.0f);
+    const int y1 = (int)ceilf(cy + radius + 1.0f);
+    for (int y = y0; y <= y1; ++y) {
+        for (int x = x0; x <= x1; ++x) {
+            float dx = (float)x - cx;
+            float dy = (float)y - cy;
+            float coverage = radius + 0.5f - sqrtf(dx * dx + dy * dy);
+            if (coverage <= 0.0f) {
+                continue;
+            }
+            canvas_blend_pixel(x, y, color, coverage >= 1.0f ? 255 : (int)(coverage * 255.0f));
+        }
+    }
+    return ESP_OK;
+}
+
+static esp_err_t draw_progress_ring(int cx, int cy, int radius, int thickness, float fraction,
+                                    uint16_t track, uint16_t color_start, uint16_t color_end)
+{
+    // 直接在画布像素上合成抗锯齿圆环：从 12 点方向顺时针绘制 fraction 比例的进度。
+    ESP_RETURN_ON_FALSE(lcd_canvas_is_active(), ESP_ERR_INVALID_STATE, TAG, "progress ring needs canvas");
+    if (fraction < 0.0f) {
+        fraction = 0.0f;
+    } else if (fraction > 1.0f) {
+        fraction = 1.0f;
+    }
+    const float outer = (float)radius;
+    const float inner = (float)(radius - thickness);
+    const float sweep = fraction * 360.0f;
+    const float rad_to_deg = 180.0f / (float)M_PI;
+
+    for (int dy = -radius - 1; dy <= radius + 1; ++dy) {
+        for (int dx = -radius - 1; dx <= radius + 1; ++dx) {
+            float dist = sqrtf((float)(dx * dx + dy * dy));
+            if (dist > outer + 0.5f || dist < inner - 0.5f) {
+                continue;
+            }
+            float coverage = 1.0f;
+            if (dist > outer - 0.5f) {
+                coverage = outer + 0.5f - dist;
+            }
+            if (dist < inner + 0.5f) {
+                float inner_cov = dist - (inner - 0.5f);
+                if (inner_cov < coverage) {
+                    coverage = inner_cov;
+                }
+            }
+            float angle = atan2f((float)dy, (float)dx) * rad_to_deg + 90.0f;
+            if (angle < 0.0f) {
+                angle += 360.0f;
+            }
+            uint16_t color = track;
+            if (fraction > 0.0f && angle <= sweep) {
+                color = mix_color(color_start, color_end, (int)angle, 360);
+            }
+            canvas_blend_pixel(cx + dx, cy + dy, color, (int)(coverage * 255.0f));
+        }
+    }
+
+    if (fraction <= 0.0f || fraction >= 1.0f) {
+        return ESP_OK;
+    }
+    // 两端圆头，进度头部加一个亮点。
+    const float mid = (float)radius - (float)thickness / 2.0f;
+    const float cap = (float)thickness / 2.0f;
+    const float head_rad = (sweep - 90.0f) / rad_to_deg;
+    const float head_x = (float)cx + cosf(head_rad) * mid;
+    const float head_y = (float)cy + sinf(head_rad) * mid;
+    ESP_RETURN_ON_ERROR(draw_aa_disc((float)cx, (float)cy - mid, cap, color_start), TAG, "draw ring cap failed");
+    ESP_RETURN_ON_ERROR(draw_aa_disc(head_x, head_y, cap, mix_color(color_start, color_end, (int)sweep, 360)),
+                        TAG, "draw ring head failed");
+    return draw_aa_disc(head_x, head_y, cap / 2.5f, rgb565(255, 255, 255));
+}
+
+static void more_tile_rect(int index, int *x, int *y)
+{
+    *x = MORE_TILE_X0 + (index % 2) * (MORE_TILE_W + MORE_TILE_GAP);
+    *y = MORE_TILE_Y0 + (index / 2) * (MORE_TILE_H + MORE_TILE_GAP);
+}
+
+static app_view_t more_tile_target_view(int index)
+{
+    switch (index) {
+    case 0:
+        return APP_VIEW_POMODORO;
+    case 1:
+        return APP_VIEW_COUNTDOWN;
+    case 2:
+        return APP_VIEW_NIGHT;
+    case 3:
+        return APP_VIEW_ANALOG_CLOCK;
+    default:
+        return APP_VIEW_DASHBOARD;
+    }
+}
+
+static esp_err_t draw_tomato_icon(int cx, int cy, uint16_t color)
+{
+    const uint16_t leaf = rgb565(96, 220, 120);
+    ESP_RETURN_ON_ERROR(lcd_fill_circle(cx, cy + 2, 9, color), TAG, "draw tomato failed");
+    ESP_RETURN_ON_ERROR(lcd_fill_circle(cx - 3, cy - 1, 2, mix_color(color, rgb565(255, 255, 255), 2, 5)),
+                        TAG, "draw tomato shine failed");
+    ESP_RETURN_ON_ERROR(lcd_fill_triangle(cx - 6, cy - 7, cx, cy - 4, cx - 1, cy - 9, leaf),
+                        TAG, "draw tomato leaf failed");
+    ESP_RETURN_ON_ERROR(lcd_fill_triangle(cx + 6, cy - 7, cx, cy - 4, cx + 1, cy - 9, leaf),
+                        TAG, "draw tomato leaf failed");
+    return lcd_fill_rect(cx, cy - 11, 2, 5, leaf);
+}
+
+static esp_err_t draw_hourglass_icon(int cx, int cy, uint16_t color)
+{
+    const uint16_t sand = rgb565(255, 211, 85);
+    ESP_RETURN_ON_ERROR(lcd_fill_rect(cx - 8, cy - 11, 17, 2, color), TAG, "draw hourglass top failed");
+    ESP_RETURN_ON_ERROR(lcd_fill_rect(cx - 8, cy + 10, 17, 2, color), TAG, "draw hourglass bottom failed");
+    ESP_RETURN_ON_ERROR(lcd_fill_triangle(cx - 7, cy - 9, cx + 7, cy - 9, cx, cy, color),
+                        TAG, "draw hourglass upper failed");
+    ESP_RETURN_ON_ERROR(lcd_fill_triangle(cx - 7, cy + 9, cx + 7, cy + 9, cx, cy, color),
+                        TAG, "draw hourglass lower failed");
+    ESP_RETURN_ON_ERROR(lcd_fill_triangle(cx - 4, cy - 7, cx + 4, cy - 7, cx, cy - 2, sand),
+                        TAG, "draw hourglass sand failed");
+    return lcd_fill_triangle(cx - 5, cy + 9, cx + 5, cy + 9, cx, cy + 4, sand);
+}
+
+static esp_err_t draw_moon_icon(int cx, int cy, uint16_t color, uint16_t background)
+{
+    ESP_RETURN_ON_ERROR(lcd_fill_circle(cx, cy, 9, color), TAG, "draw moon failed");
+    ESP_RETURN_ON_ERROR(lcd_fill_circle(cx + 5, cy - 4, 8, background), TAG, "draw moon cut failed");
+    ESP_RETURN_ON_ERROR(lcd_fill_rect(cx + 7, cy + 4, 1, 1, color), TAG, "draw moon star failed");
+    return lcd_fill_rect(cx + 9, cy - 9, 1, 1, color);
+}
+
+static esp_err_t draw_mini_clock_icon(int cx, int cy, uint16_t color, uint16_t background)
+{
+    ESP_RETURN_ON_ERROR(lcd_fill_circle(cx, cy, 10, color), TAG, "draw mini clock failed");
+    ESP_RETURN_ON_ERROR(lcd_fill_circle(cx, cy, 8, background), TAG, "draw mini clock face failed");
+    ESP_RETURN_ON_ERROR(lcd_draw_line(cx, cy, cx, cy - 6, 2, color), TAG, "draw mini clock hand failed");
+    ESP_RETURN_ON_ERROR(lcd_draw_line(cx, cy, cx + 4, cy + 2, 2, color), TAG, "draw mini clock hand failed");
+    return lcd_fill_circle(cx, cy, 1, rgb565(255, 255, 255));
+}
+
+static esp_err_t draw_more_tile(int index, const char *title, const char *subtitle,
+                                uint16_t accent, bool active)
+{
+    int x = 0;
+    int y = 0;
+    more_tile_rect(index, &x, &y);
+    const uint16_t border = mix_color(rgb565(26, 38, 74), accent, active ? 3 : 1, active ? 5 : 3);
+    const uint16_t fill_top = mix_color(rgb565(16, 24, 52), accent, 1, active ? 5 : 8);
+    const uint16_t fill_bottom = rgb565(8, 12, 30);
+    const uint16_t icon_bg = mix_color(rgb565(10, 16, 38), accent, 1, 4);
+    const uint16_t title_color = rgb565(232, 240, 255);
+    const int icon_cx = x + 26;
+    const int icon_cy = y + MORE_TILE_H / 2;
+
+    ESP_RETURN_ON_ERROR(lcd_fill_round_rect(x, y, MORE_TILE_W, MORE_TILE_H, 10, border),
+                        TAG, "draw more tile border failed");
+    ESP_RETURN_ON_ERROR(lcd_fill_round_rect(x + 1, y + 1, MORE_TILE_W - 2, MORE_TILE_H - 2, 9, fill_bottom),
+                        TAG, "draw more tile fill failed");
+    for (int row = 0; row < MORE_TILE_H / 2; ++row) {
+        int inset = row < 9 ? 9 - (int)sqrtf((float)(81 - (9 - row) * (9 - row))) : 0;
+        ESP_RETURN_ON_ERROR(lcd_fill_rect(x + 1 + inset, y + 1 + row, MORE_TILE_W - 2 - inset * 2, 1,
+                                          mix_color(fill_top, fill_bottom, row, MORE_TILE_H / 2)),
+                            TAG, "draw more tile gradient failed");
+    }
+    ESP_RETURN_ON_ERROR(lcd_fill_circle(icon_cx, icon_cy, 17, icon_bg), TAG, "draw more tile icon bg failed");
+    switch (index) {
+    case 0:
+        ESP_RETURN_ON_ERROR(draw_tomato_icon(icon_cx, icon_cy, accent), TAG, "draw tomato tile failed");
+        break;
+    case 1:
+        ESP_RETURN_ON_ERROR(draw_hourglass_icon(icon_cx, icon_cy, accent), TAG, "draw hourglass tile failed");
+        break;
+    case 2:
+        ESP_RETURN_ON_ERROR(draw_moon_icon(icon_cx - 1, icon_cy, accent, icon_bg), TAG, "draw moon tile failed");
+        break;
+    default:
+        ESP_RETURN_ON_ERROR(draw_mini_clock_icon(icon_cx, icon_cy, accent, icon_bg), TAG, "draw clock tile failed");
+        break;
+    }
+
+    const int text_x = x + 52;
+    const int text_w = MORE_TILE_W - 58;
+    ESP_RETURN_ON_ERROR(draw_text_mixed_limited(text_x, y + 13, title, text_w, 1, title_color),
+                        TAG, "draw more tile title failed");
+    int scale = text5_width(subtitle, 2) <= text_w ? 2 : 1;
+    ESP_RETURN_ON_ERROR(draw_text5(text_x, y + MORE_TILE_H - (scale == 2 ? 24 : 20), subtitle, scale,
+                                   active ? accent : mix_color(rgb565(140, 156, 190), accent, 1, 3)),
+                        TAG, "draw more tile subtitle failed");
+    if (active) {
+        ESP_RETURN_ON_ERROR(lcd_fill_circle(x + MORE_TILE_W - 12, y + MORE_TILE_H - 14, 3, accent),
+                            TAG, "draw more tile active dot failed");
+    }
+    return ESP_OK;
+}
+
+static void focus_timer_tile_subtitle(const focus_timer_t *timer, int idle_minutes, char *out, size_t out_len)
+{
+    if (timer->finished) {
+        strlcpy(out, "DONE", out_len);
+    } else if (timer->running || focus_timer_is_paused(timer)) {
+        format_timer_mmss(focus_timer_remaining_seconds(timer), out, out_len);
+    } else {
+        snprintf(out, out_len, "%d MIN", idle_minutes);
+    }
+}
+
+static esp_err_t draw_more_screen(const struct tm *tm)
+{
+    const uint16_t accent = rgb565(105, 207, 255);
+    char pomodoro_buf[16];
+    char countdown_buf[16];
+    char night_buf[16];
+    char clock_buf[8];
+
+    focus_timer_tile_subtitle(&s_pomodoro_timer, s_pomodoro_presets[s_pomodoro_preset].minutes,
+                              pomodoro_buf, sizeof(pomodoro_buf));
+    focus_timer_tile_subtitle(&s_countdown_timer, s_countdown_minutes, countdown_buf, sizeof(countdown_buf));
+    if (s_night.enabled) {
+        snprintf(night_buf, sizeof(night_buf), "%02d-%02d", s_night.start_hour, s_night.end_hour);
+    } else {
+        strlcpy(night_buf, "OFF", sizeof(night_buf));
+    }
+    snprintf(clock_buf, sizeof(clock_buf), "%02d:%02d", tm->tm_hour, tm->tm_min);
+
+    ESP_RETURN_ON_ERROR(draw_view_background(rgb565(6, 10, 28), rgb565(8, 14, 34)),
+                        TAG, "draw more bg failed");
+    ESP_RETURN_ON_ERROR(draw_view_header("更多", tm, accent), TAG, "draw more header failed");
+    ESP_RETURN_ON_ERROR(draw_more_tile(0, "番茄钟", pomodoro_buf, rgb565(255, 99, 88),
+                                       s_pomodoro_timer.running || s_pomodoro_timer.finished),
+                        TAG, "draw pomodoro tile failed");
+    ESP_RETURN_ON_ERROR(draw_more_tile(1, "倒计时", countdown_buf, rgb565(255, 185, 85),
+                                       s_countdown_timer.running || s_countdown_timer.finished),
+                        TAG, "draw countdown tile failed");
+    ESP_RETURN_ON_ERROR(draw_more_tile(2, "夜间模式", night_buf, rgb565(176, 150, 255), s_night.enabled),
+                        TAG, "draw night tile failed");
+    ESP_RETURN_ON_ERROR(draw_more_tile(3, "时钟", clock_buf, rgb565(76, 176, 255), false),
+                        TAG, "draw clock tile failed");
+    return lcd_canvas_flush();
+}
+
+static void timer_side_button_rect(int col, int y, int *x, int *w)
+{
+    *x = TIMER_SIDE_X + col * (TIMER_SIDE_BUTTON_W + TIMER_SIDE_GAP);
+    *w = TIMER_SIDE_BUTTON_W;
+    (void)y;
+}
+
+static void pomodoro_preset_rect(int index, int *x, int *y, int *w, int *h)
+{
+    timer_side_button_rect(index % 2, 0, x, w);
+    *y = TIMER_PRESET_Y0 + (index / 2) * (POMODORO_PRESET_H + TIMER_SIDE_GAP);
+    *h = POMODORO_PRESET_H;
+}
+
+static void countdown_preset_rect(int index, int *x, int *y, int *w, int *h)
+{
+    timer_side_button_rect(index % 2, 0, x, w);
+    *y = TIMER_PRESET_Y0 + (index / 2) * (COUNTDOWN_PRESET_H + COUNTDOWN_PRESET_GAP);
+    *h = COUNTDOWN_PRESET_H;
+}
+
+static const char *focus_timer_primary_label(const focus_timer_t *timer)
+{
+    if (timer->running) {
+        return "暂停";
+    }
+    if (focus_timer_is_paused(timer)) {
+        return "继续";
+    }
+    return "开始";
+}
+
+static esp_err_t draw_timer_controls(const focus_timer_t *timer, uint16_t accent)
+{
+    int x = 0;
+    int w = 0;
+    timer_side_button_rect(0, TIMER_CONTROL_Y, &x, &w);
+    ESP_RETURN_ON_ERROR(draw_dialog_button(x, TIMER_CONTROL_Y, w, TIMER_CONTROL_H,
+                                           focus_timer_primary_label(timer), true, accent),
+                        TAG, "draw timer primary button failed");
+    timer_side_button_rect(1, TIMER_CONTROL_Y, &x, &w);
+    return draw_dialog_button(x, TIMER_CONTROL_Y, w, TIMER_CONTROL_H, "重置", false, accent);
+}
+
+static esp_err_t draw_timer_dial(const focus_timer_t *timer, const char *phase_label,
+                                 uint16_t color_start, uint16_t color_end, int blink_second)
+{
+    const int cx = TIMER_RING_CX;
+    const int cy = TIMER_RING_CY;
+    const uint16_t text = rgb565(240, 245, 255);
+    const uint16_t muted = rgb565(142, 158, 191);
+    const uint16_t done = rgb565(76, 235, 142);
+    const uint16_t track = mix_color(rgb565(18, 26, 55), color_start, 1, 6);
+    char time_buf[8];
+    float fraction = focus_timer_fraction(timer);
+    uint16_t ring_start = color_start;
+    uint16_t ring_end = color_end;
+
+    if (timer->finished) {
+        // 结束后整圈闪烁提醒，直到用户操作。
+        fraction = 1.0f;
+        ring_start = (blink_second % 2) == 0 ? done : mix_color(track, done, 1, 3);
+        ring_end = ring_start;
+    }
+
+    ESP_RETURN_ON_ERROR(lcd_fill_circle(cx, cy, TIMER_RING_RADIUS + 4, rgb565(10, 16, 38)),
+                        TAG, "draw timer halo failed");
+    ESP_RETURN_ON_ERROR(draw_progress_ring(cx, cy, TIMER_RING_RADIUS, TIMER_RING_THICKNESS, fraction,
+                                           track, ring_start, ring_end),
+                        TAG, "draw timer ring failed");
+    ESP_RETURN_ON_ERROR(lcd_fill_circle(cx, cy, TIMER_RING_RADIUS - TIMER_RING_THICKNESS - 4,
+                                        mix_color(rgb565(8, 12, 30), color_start, 1, 12)),
+                        TAG, "draw timer face failed");
+
+    format_timer_mmss(focus_timer_remaining_seconds(timer), time_buf, sizeof(time_buf));
+    ESP_RETURN_ON_ERROR(draw_text_mixed_centered_limited(cx, cy - 38, phase_label, 90, 1,
+                                                         mix_color(muted, color_start, 1, 2)),
+                        TAG, "draw timer phase failed");
+    ESP_RETURN_ON_ERROR(draw_text5_centered(cx, cy - 11, time_buf, 3, timer->finished ? done : text),
+                        TAG, "draw timer digits failed");
+
+    const char *state = NULL;
+    uint16_t state_color = muted;
+    if (timer->finished) {
+        state = "完成";
+        state_color = done;
+    } else if (timer->running) {
+        state = NULL;
+    } else if (focus_timer_is_paused(timer)) {
+        state = "暂停";
+        state_color = rgb565(255, 211, 85);
+    } else {
+        state = "准备";
+    }
+    if (state != NULL) {
+        ESP_RETURN_ON_ERROR(draw_text_mixed_centered(cx, cy + 16, state, 1, state_color),
+                            TAG, "draw timer state failed");
+    }
+    return ESP_OK;
+}
+
+static esp_err_t draw_pomodoro_screen(const struct tm *tm)
+{
+    const uint16_t accent = rgb565(255, 99, 88);
+    const pomodoro_preset_t *current = &s_pomodoro_presets[s_pomodoro_preset];
+    const bool focus = current->phase == POMODORO_PHASE_FOCUS;
+    const uint16_t ring_start = focus ? rgb565(255, 120, 96) : rgb565(30, 226, 214);
+    const uint16_t ring_end = focus ? rgb565(255, 196, 76) : rgb565(76, 235, 142);
+
+    ESP_RETURN_ON_ERROR(draw_view_background(rgb565(14, 8, 24), rgb565(8, 12, 32)),
+                        TAG, "draw pomodoro bg failed");
+    ESP_RETURN_ON_ERROR(draw_view_header("番茄钟", tm, accent), TAG, "draw pomodoro header failed");
+    ESP_RETURN_ON_ERROR(draw_timer_dial(&s_pomodoro_timer, current->label, ring_start, ring_end, tm->tm_sec),
+                        TAG, "draw pomodoro dial failed");
+
+    // 已完成的番茄数：每 4 个一组，用小圆点显示当前组进度。
+    int filled = s_pomodoro_completed == 0 ? 0 :
+                 ((s_pomodoro_completed - 1) % POMODORO_ROUNDS_PER_LONG_BREAK) + 1;
+    for (int i = 0; i < POMODORO_ROUNDS_PER_LONG_BREAK; ++i) {
+        int dot_x = TIMER_RING_CX - 21 + i * 14;
+        int dot_y = TIMER_RING_CY + 42;
+        uint16_t dot = i < filled ? accent : rgb565(44, 50, 84);
+        ESP_RETURN_ON_ERROR(lcd_fill_circle(dot_x, dot_y, 4, dot), TAG, "draw pomodoro dot failed");
+    }
+
+    for (int i = 0; i < POMODORO_PRESET_COUNT; ++i) {
+        int x = 0;
+        int y = 0;
+        int w = 0;
+        int h = 0;
+        char minutes_buf[8];
+        const pomodoro_preset_t *preset = &s_pomodoro_presets[i];
+        const bool selected = i == s_pomodoro_preset;
+        const uint16_t preset_accent = preset->phase == POMODORO_PHASE_FOCUS ? accent : rgb565(30, 226, 214);
+        const uint16_t fill = selected ? mix_color(rgb565(16, 22, 44), preset_accent, 1, 3) : rgb565(16, 22, 44);
+        const uint16_t border = selected ? preset_accent : mix_color(rgb565(30, 40, 70), preset_accent, 1, 3);
+
+        pomodoro_preset_rect(i, &x, &y, &w, &h);
+        snprintf(minutes_buf, sizeof(minutes_buf), "%d", preset->minutes);
+        ESP_RETURN_ON_ERROR(lcd_fill_round_rect(x, y, w, h, 9, border), TAG, "draw pomodoro preset failed");
+        ESP_RETURN_ON_ERROR(lcd_fill_round_rect(x + 1, y + 1, w - 2, h - 2, 8, fill),
+                            TAG, "draw pomodoro preset fill failed");
+        ESP_RETURN_ON_ERROR(draw_text_mixed_centered(x + w / 2, y + 6, preset->label, 1,
+                                                     selected ? rgb565(255, 255, 255) : rgb565(196, 210, 238)),
+                            TAG, "draw pomodoro preset label failed");
+        ESP_RETURN_ON_ERROR(draw_text5_centered(x + w / 2, y + h - 19, minutes_buf, 2, preset_accent),
+                            TAG, "draw pomodoro preset minutes failed");
+    }
+    ESP_RETURN_ON_ERROR(draw_timer_controls(&s_pomodoro_timer, accent), TAG, "draw pomodoro controls failed");
+    return lcd_canvas_flush();
+}
+
+static esp_err_t draw_countdown_screen(const struct tm *tm)
+{
+    const uint16_t accent = rgb565(255, 185, 85);
+    char label_buf[24];
+
+    snprintf(label_buf, sizeof(label_buf), "%d 分", s_countdown_minutes);
+    ESP_RETURN_ON_ERROR(draw_view_background(rgb565(14, 10, 22), rgb565(8, 12, 30)),
+                        TAG, "draw countdown bg failed");
+    ESP_RETURN_ON_ERROR(draw_view_header("倒计时", tm, accent), TAG, "draw countdown header failed");
+    ESP_RETURN_ON_ERROR(draw_timer_dial(&s_countdown_timer, label_buf, rgb565(255, 211, 85),
+                                        rgb565(255, 120, 170), tm->tm_sec),
+                        TAG, "draw countdown dial failed");
+
+    for (int i = 0; i < COUNTDOWN_PRESET_COUNT; ++i) {
+        int x = 0;
+        int y = 0;
+        int w = 0;
+        int h = 0;
+        char preset_buf[16];
+        countdown_preset_rect(i, &x, &y, &w, &h);
+        snprintf(preset_buf, sizeof(preset_buf), "%d分", s_countdown_presets[i]);
+        ESP_RETURN_ON_ERROR(draw_dialog_button(x, y, w, h, preset_buf,
+                                               s_countdown_presets[i] == s_countdown_minutes, accent),
+                            TAG, "draw countdown preset failed");
+    }
+    ESP_RETURN_ON_ERROR(draw_timer_controls(&s_countdown_timer, accent), TAG, "draw countdown controls failed");
+    return lcd_canvas_flush();
+}
+
+static int night_row_y(int row)
+{
+    return NIGHT_ROW_Y0 + row * (NIGHT_ROW_H + NIGHT_ROW_GAP);
+}
+
+static esp_err_t draw_night_toggle(int x, int y, bool on, uint16_t accent)
+{
+    const uint16_t track = on ? accent : rgb565(44, 52, 86);
+    const int knob_r = NIGHT_TOGGLE_H / 2 - 3;
+    const int knob_x = on ? x + NIGHT_TOGGLE_W - NIGHT_TOGGLE_H / 2 : x + NIGHT_TOGGLE_H / 2;
+    ESP_RETURN_ON_ERROR(lcd_fill_round_rect(x, y, NIGHT_TOGGLE_W, NIGHT_TOGGLE_H, NIGHT_TOGGLE_H / 2, track),
+                        TAG, "draw toggle track failed");
+    ESP_RETURN_ON_ERROR(draw_text5(on ? x + 9 : x + NIGHT_TOGGLE_W - 26, y + 10, on ? "ON" : "OFF", 1,
+                                   on ? rgb565(20, 16, 40) : rgb565(150, 160, 190)),
+                        TAG, "draw toggle text failed");
+    return lcd_fill_circle(knob_x, y + NIGHT_TOGGLE_H / 2, knob_r, rgb565(240, 245, 255));
+}
+
+static esp_err_t draw_step_button(int x, int y, int w, int h, bool plus, uint16_t accent)
+{
+    const int cx = x + w / 2;
+    const int cy = y + h / 2;
+    ESP_RETURN_ON_ERROR(draw_dialog_button(x, y, w, h, "", false, accent), TAG, "draw step button failed");
+    ESP_RETURN_ON_ERROR(lcd_fill_rect(cx - 6, cy - 1, 13, 3, accent), TAG, "draw step minus failed");
+    if (!plus) {
+        return ESP_OK;
+    }
+    return lcd_fill_rect(cx - 1, cy - 6, 3, 13, accent);
+}
+
+static esp_err_t draw_night_screen(const struct tm *tm)
+{
+    const uint16_t accent = rgb565(176, 150, 255);
+    const uint16_t text = rgb565(232, 240, 255);
+    const uint16_t muted = rgb565(142, 158, 191);
+    const uint16_t line = rgb565(32, 42, 76);
+    const bool active = night_mode_active(tm);
+    static const char *const labels[NIGHT_ROW_COUNT] = {"开始", "结束", "亮度"};
+    char values[NIGHT_ROW_COUNT][8];
+
+    snprintf(values[0], sizeof(values[0]), "%02d:00", s_night.start_hour);
+    snprintf(values[1], sizeof(values[1]), "%02d:00", s_night.end_hour);
+    snprintf(values[2], sizeof(values[2]), "%d%%", s_night.dim_percent);
+
+    ESP_RETURN_ON_ERROR(draw_view_background(rgb565(8, 6, 24), rgb565(6, 10, 26)),
+                        TAG, "draw night bg failed");
+    ESP_RETURN_ON_ERROR(draw_view_header("夜间模式", tm, accent), TAG, "draw night header failed");
+
+    ESP_RETURN_ON_ERROR(draw_moon_icon(NIGHT_ROW_X + 9, NIGHT_TOGGLE_Y + NIGHT_TOGGLE_H / 2,
+                                       s_night.enabled ? accent : muted, rgb565(8, 8, 26)),
+                        TAG, "draw night moon failed");
+    ESP_RETURN_ON_ERROR(draw_text_mixed(NIGHT_ROW_X + 26, NIGHT_TOGGLE_Y + 5, "自动调暗", 1, text),
+                        TAG, "draw night title failed");
+    if (active) {
+        ESP_RETURN_ON_ERROR(draw_text_mixed(NIGHT_ROW_X + 26 + text_mixed_width("自动调暗", 1) + 8,
+                                            NIGHT_TOGGLE_Y + 5, "生效中", 1, rgb565(255, 211, 85)),
+                            TAG, "draw night active failed");
+    }
+    ESP_RETURN_ON_ERROR(draw_night_toggle(NIGHT_ROW_RIGHT - NIGHT_TOGGLE_W, NIGHT_TOGGLE_Y, s_night.enabled, accent),
+                        TAG, "draw night toggle failed");
+    ESP_RETURN_ON_ERROR(lcd_draw_hline(NIGHT_ROW_X, NIGHT_ROW_Y0 - 5, NIGHT_ROW_RIGHT - NIGHT_ROW_X, line),
+                        TAG, "draw night divider failed");
+
+    for (int row = 0; row < NIGHT_ROW_COUNT; ++row) {
+        const int y = night_row_y(row);
+        const uint16_t row_accent = s_night.enabled ? accent : mix_color(muted, accent, 1, 3);
+        const char *value = values[row];
+        if (row == 2 && s_night.dim_percent == 0) {
+            value = NULL;
+        }
+        ESP_RETURN_ON_ERROR(draw_text_mixed(NIGHT_ROW_X, y + (NIGHT_ROW_H - 16) / 2, labels[row], 1, muted),
+                            TAG, "draw night row label failed");
+        if (value != NULL) {
+            ESP_RETURN_ON_ERROR(draw_text5_centered(NIGHT_VALUE_CX, y + (NIGHT_ROW_H - 14) / 2, value, 2,
+                                                    s_night.enabled ? text : muted),
+                                TAG, "draw night row value failed");
+        } else {
+            ESP_RETURN_ON_ERROR(draw_text_mixed_centered(NIGHT_VALUE_CX, y + (NIGHT_ROW_H - 16) / 2, "关屏", 1,
+                                                         s_night.enabled ? text : muted),
+                                TAG, "draw night row value failed");
+        }
+        ESP_RETURN_ON_ERROR(draw_step_button(NIGHT_MINUS_X, y, NIGHT_STEP_BUTTON_W, NIGHT_ROW_H, false, row_accent),
+                            TAG, "draw night minus failed");
+        ESP_RETURN_ON_ERROR(draw_step_button(NIGHT_PLUS_X, y, NIGHT_STEP_BUTTON_W, NIGHT_ROW_H, true, row_accent),
+                            TAG, "draw night plus failed");
+    }
+
+    char hint_buf[48];
+    snprintf(hint_buf, sizeof(hint_buf), "夜间轻触屏幕亮起 %d 秒", NIGHT_TOUCH_WAKE_MS / 1000);
+    ESP_RETURN_ON_ERROR(draw_text_mixed_centered(160, night_row_y(NIGHT_ROW_COUNT) + 4, hint_buf, 1, muted),
+                        TAG, "draw night hint failed");
+    return lcd_canvas_flush();
+}
+
+static bool point_in_timer_ring(int x, int y)
+{
+    int dx = x - TIMER_RING_CX;
+    int dy = y - TIMER_RING_CY;
+    return dx * dx + dy * dy <= (TIMER_RING_RADIUS + 6) * (TIMER_RING_RADIUS + 6);
+}
+
+static bool timer_controls_handle_touch(focus_timer_t *timer, int x, int y)
+{
+    int bx = 0;
+    int bw = 0;
+    timer_side_button_rect(0, TIMER_CONTROL_Y, &bx, &bw);
+    if (point_in_rect(x, y, bx, TIMER_CONTROL_Y, bw, TIMER_CONTROL_H) || point_in_timer_ring(x, y)) {
+        focus_timer_toggle(timer);
+        return true;
+    }
+    timer_side_button_rect(1, TIMER_CONTROL_Y, &bx, &bw);
+    if (point_in_rect(x, y, bx, TIMER_CONTROL_Y, bw, TIMER_CONTROL_H)) {
+        focus_timer_reset(timer);
+        return true;
+    }
+    return false;
+}
+
+static bool pomodoro_handle_touch(int x, int y)
+{
+    for (int i = 0; i < POMODORO_PRESET_COUNT; ++i) {
+        int px = 0;
+        int py = 0;
+        int pw = 0;
+        int ph = 0;
+        pomodoro_preset_rect(i, &px, &py, &pw, &ph);
+        if (point_in_rect(x, y, px, py, pw, ph)) {
+            pomodoro_apply_preset(i, true);
+            return true;
+        }
+    }
+    return timer_controls_handle_touch(&s_pomodoro_timer, x, y);
+}
+
+static bool countdown_handle_touch(int x, int y)
+{
+    for (int i = 0; i < COUNTDOWN_PRESET_COUNT; ++i) {
+        int px = 0;
+        int py = 0;
+        int pw = 0;
+        int ph = 0;
+        countdown_preset_rect(i, &px, &py, &pw, &ph);
+        if (point_in_rect(x, y, px, py, pw, ph)) {
+            countdown_apply_minutes(s_countdown_presets[i], true);
+            return true;
+        }
+    }
+    return timer_controls_handle_touch(&s_countdown_timer, x, y);
+}
+
+static bool night_handle_touch(int x, int y)
+{
+    if (point_in_rect(x, y, NIGHT_ROW_X, NIGHT_TOGGLE_Y - 4, NIGHT_ROW_RIGHT - NIGHT_ROW_X, NIGHT_TOGGLE_H + 8)) {
+        s_night.enabled = !s_night.enabled;
+        night_config_save();
+        return true;
+    }
+    for (int row = 0; row < NIGHT_ROW_COUNT; ++row) {
+        const int y0 = night_row_y(row);
+        int delta = 0;
+        if (point_in_rect(x, y, NIGHT_MINUS_X, y0, NIGHT_STEP_BUTTON_W, NIGHT_ROW_H)) {
+            delta = -1;
+        } else if (point_in_rect(x, y, NIGHT_PLUS_X, y0, NIGHT_STEP_BUTTON_W, NIGHT_ROW_H)) {
+            delta = 1;
+        } else {
+            continue;
+        }
+        if (row == 0) {
+            s_night.start_hour = (uint8_t)((s_night.start_hour + 24 + delta) % 24);
+        } else if (row == 1) {
+            s_night.end_hour = (uint8_t)((s_night.end_hour + 24 + delta) % 24);
+        } else {
+            int level = night_dim_level_index() + delta;
+            level = clamp_int(level, 0, NIGHT_DIM_LEVEL_COUNT - 1);
+            s_night.dim_percent = s_night_dim_levels[level];
+        }
+        night_config_save();
+        return true;
+    }
+    return false;
+}
+
 static esp_err_t draw_current_view(const struct tm *tm, app_view_t view)
 {
     switch (view) {
@@ -6602,6 +7722,14 @@ static esp_err_t draw_current_view(const struct tm *tm, app_view_t view)
         return draw_komari_screen(tm);
     case APP_VIEW_HEALTH:
         return draw_health_screen(tm);
+    case APP_VIEW_MORE:
+        return draw_more_screen(tm);
+    case APP_VIEW_POMODORO:
+        return draw_pomodoro_screen(tm);
+    case APP_VIEW_COUNTDOWN:
+        return draw_countdown_screen(tm);
+    case APP_VIEW_NIGHT:
+        return draw_night_screen(tm);
     case APP_VIEW_DASHBOARD:
     default:
         return draw_clock_screen(tm);
@@ -7649,6 +8777,14 @@ static const char *view_name(app_view_t view)
         return "komari";
     case APP_VIEW_HEALTH:
         return "health";
+    case APP_VIEW_MORE:
+        return "more";
+    case APP_VIEW_POMODORO:
+        return "pomodoro";
+    case APP_VIEW_COUNTDOWN:
+        return "countdown";
+    case APP_VIEW_NIGHT:
+        return "night";
     case APP_VIEW_DASHBOARD:
     default:
         return "dashboard";
@@ -7679,6 +8815,11 @@ static bool touch_poll_view_change(app_view_t *view)
         return false;
     }
     s_touch.last_trigger_tick = now;
+
+    if (backlight_handle_touch_wake()) {
+        ESP_LOGI(TAG, "touch woke dimmed backlight at (%d,%d)", x, y);
+        return false;
+    }
 
     app_view_t next_view = *view;
     int nav_x = 0;
@@ -7734,6 +8875,32 @@ static bool touch_poll_view_change(app_view_t *view)
             redraw = true;
         } else {
             next_view = APP_VIEW_DASHBOARD;
+        }
+    } else if (*view == APP_VIEW_MORE) {
+        next_view = APP_VIEW_DASHBOARD;
+        for (int i = 0; i < MORE_TILE_COUNT; ++i) {
+            int tile_x = 0;
+            int tile_y = 0;
+            more_tile_rect(i, &tile_x, &tile_y);
+            if (point_in_rect(x, y, tile_x, tile_y, MORE_TILE_W, MORE_TILE_H)) {
+                next_view = more_tile_target_view(i);
+                break;
+            }
+        }
+    } else if (*view == APP_VIEW_POMODORO) {
+        redraw = pomodoro_handle_touch(x, y);
+        if (!redraw) {
+            next_view = APP_VIEW_MORE;
+        }
+    } else if (*view == APP_VIEW_COUNTDOWN) {
+        redraw = countdown_handle_touch(x, y);
+        if (!redraw) {
+            next_view = APP_VIEW_MORE;
+        }
+    } else if (*view == APP_VIEW_NIGHT) {
+        redraw = night_handle_touch(x, y);
+        if (!redraw) {
+            next_view = APP_VIEW_MORE;
         }
     } else if (*view != APP_VIEW_DASHBOARD) {
         next_view = APP_VIEW_DASHBOARD;
@@ -7892,6 +9059,12 @@ static esp_err_t lcd_init(void)
     ESP_RETURN_ON_ERROR(esp_lcd_panel_disp_on_off(s_lcd.panel, true), TAG, "LCD display on failed");
 
     gpio_set_level(CONFIG_CLOCK_LCD_PIN_BACKLIGHT, CONFIG_CLOCK_LCD_BACKLIGHT_ACTIVE_HIGH ? 1 : 0);
+    esp_err_t bl_ret = backlight_init();
+    if (bl_ret != ESP_OK) {
+        // PWM 不可用时退回普通 GPIO 开关，夜间模式只能整屏开/关。
+        ESP_LOGW(TAG, "backlight PWM unavailable, fallback to GPIO: %s", esp_err_to_name(bl_ret));
+        s_backlight_percent = 100;
+    }
     ESP_LOGI(TAG, "LCD initialized: ILI9341 SPI 320x240 RGB565");
     return ESP_OK;
 }
@@ -7918,6 +9091,10 @@ void app_main(void)
     ESP_ERROR_CHECK(komari_config_load());
     ESP_ERROR_CHECK(ota_state_init());
     ESP_ERROR_CHECK(ota_config_load());
+    if (night_config_load() != ESP_OK) {
+        ESP_LOGW(TAG, "load night mode config failed, using defaults");
+    }
+    focus_tools_init();
     ESP_ERROR_CHECK(lcd_init());
     ESP_ERROR_CHECK(touch_init());
     ESP_ERROR_CHECK(draw_static_background());
@@ -7934,6 +9111,7 @@ void app_main(void)
     }
 
     int last_second = -1;
+    int last_timer_tick = -1;
     app_view_t last_view = APP_VIEW_DASHBOARD;
     bool force_redraw = true;
     while (true) {
@@ -7946,12 +9124,43 @@ void app_main(void)
             force_redraw = true;
         }
 
+        // 计时结束：自动跳到对应页面并点亮背光提醒（OTA 确认/升级中不打断）。
+        if (focus_timer_poll_finished(&s_pomodoro_timer)) {
+            pomodoro_on_finished();
+            backlight_wake(TIMER_ALERT_WAKE_MS);
+            if (s_current_view != APP_VIEW_OTA_CONFIRM) {
+                s_current_view = APP_VIEW_POMODORO;
+            }
+            force_redraw = true;
+        }
+        if (focus_timer_poll_finished(&s_countdown_timer)) {
+            ESP_LOGI(TAG, "countdown finished (%d min)", s_countdown_minutes);
+            backlight_wake(TIMER_ALERT_WAKE_MS);
+            if (s_current_view != APP_VIEW_OTA_CONFIRM) {
+                s_current_view = APP_VIEW_COUNTDOWN;
+            }
+            force_redraw = true;
+        }
+        backlight_update(&tm);
+
         if (s_current_view != last_view) {
             last_view = s_current_view;
             force_redraw = true;
         }
 
-        if (force_redraw || tm.tm_sec != last_second) {
+        // 计时页面按计时器自己的秒跳动刷新，避免与系统时钟秒边界错位造成跳秒。
+        const focus_timer_t *view_timer = s_current_view == APP_VIEW_POMODORO ? &s_pomodoro_timer :
+                                          (s_current_view == APP_VIEW_COUNTDOWN ? &s_countdown_timer : NULL);
+        bool tick_changed = tm.tm_sec != last_second;
+        if (view_timer != NULL && view_timer->running) {
+            int timer_tick = focus_timer_remaining_seconds(view_timer);
+            tick_changed = timer_tick != last_timer_tick || (tick_changed && tm.tm_sec == 0);
+            last_timer_tick = timer_tick;
+        } else {
+            last_timer_tick = -1;
+        }
+
+        if (force_redraw || tick_changed) {
             last_second = tm.tm_sec;
             force_redraw = false;
             esp_err_t ret = draw_current_view(&tm, s_current_view);
